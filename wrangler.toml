@@ -1,0 +1,7 @@
+name = "petsyndrome-api"
+main = "worker.js"
+compatibility_date = "2026-04-19"
+
+[[kv_namespaces]]
+binding = "PET_KV"
+id = "2ecf3a3eea2440f88e9936d559349017"
