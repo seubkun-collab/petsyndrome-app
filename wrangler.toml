@@ -1,7 +1,10 @@
-name = "petsyndrome-api"
+
+name = "petsyndrome-app"
 main = "worker.js"
 compatibility_date = "2026-04-19"
 
+account_id = "2ecf3a3eea2440f88e9936d559349017"
+
 [[kv_namespaces]]
 binding = "PET_KV"
-id = "2ecf3a3eea2440f88e9936d559349017"
+id = "KV_ID"
