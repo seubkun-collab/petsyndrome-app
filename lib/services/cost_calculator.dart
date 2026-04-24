@@ -29,7 +29,44 @@ class CostCalculator {
   // 기본 최종 로스율 3% (마진율과 별도로 항상 적용)
   static const double defaultFinalLossRate = 0.03;
 
-  /// 단미 원가 계산
+  /// 단미 순수 원가 계산 (마진·최종로스 제외)
+  /// 공식: ((원물가격+절단비)/(1-절단로스율)+건조비)/(1-수분)
+  static double calcSingleRawCostNoMargin({
+    required double unitPrice,
+    required double moisture,
+    required WorkCost wc,
+  }) {
+    final step1 = (unitPrice + wc.cuttingCost) / (1 - wc.cuttingLossRate);
+    final step2 = (step1 + wc.dryingCost) / (1 - moisture);
+    return step2;
+  }
+
+  /// 배합 순수 원가 계산 (마진·최종로스 제외)
+  static double calcMixedRawCostNoMargin({
+    required List<RecipeItem> items,
+    required List<Ingredient> ingredients,
+    required WorkCost wc,
+  }) {
+    double totalWeightedCost = 0;
+    double totalWeightedMoisture = 0;
+    double totalRatio = 0;
+    for (final item in items) {
+      final ing = ingredients.where((i) => i.id == item.ingredientId).firstOrNull;
+      if (ing == null) continue;
+      final ratio = item.ratio / 100.0;
+      totalWeightedCost += ing.unitPrice * ratio;
+      totalWeightedMoisture += ing.moisture * ratio;
+      totalRatio += ratio;
+    }
+    if (totalRatio == 0) return 0;
+    final avgPrice = totalWeightedCost / totalRatio;
+    final avgMoisture = totalWeightedMoisture / totalRatio;
+    final step1 = (avgPrice + wc.mixingCost + wc.cuttingCost) / (1 - wc.cuttingLossRate);
+    final step2 = (step1 + wc.dryingCost) / (1 - avgMoisture);
+    return step2;
+  }
+
+  /// 단미 원가 계산 (마진+최종로스 포함 → 최종 판매단가)
   /// 공식: (((원물가격+절단비)/(1-절단로스율)+건조비)/(1-수분)) / (1-마진율) / (1-최종로스율)
   /// 최종로스율: 기본 3% 고정
   static double calcSingleRawCostPerKg({

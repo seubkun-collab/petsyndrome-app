@@ -5,7 +5,6 @@ import '../../models/packaging.dart';
 import '../../services/data_service.dart';
 import '../../utils/theme.dart';
 import '../../utils/formatter.dart';
-import '../../services/cloudflare_service.dart';
 
 class WorkCostScreen extends StatefulWidget {
   const WorkCostScreen({super.key});
@@ -59,7 +58,8 @@ class _DryingCostTab extends StatefulWidget {
 }
 
 class _DryingCostTabState extends State<_DryingCostTab> {
-  late WorkCost _wc;
+  WorkCost? _wc;          // nullable로 변경 — 로딩 전 null
+  bool _loading = true;
   final _dryingCtrl = TextEditingController();
   final _mixingCtrl = TextEditingController();
   final _cuttingCtrl = TextEditingController();
@@ -70,24 +70,36 @@ class _DryingCostTabState extends State<_DryingCostTab> {
   @override
   void initState() {
     super.initState();
-    _load();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() => _loading = true);
+    await DataService.refreshAll();
+    if (mounted) {
+      _load();
+      setState(() => _loading = false);
+    }
   }
 
   void _load() {
-    _wc = DataService.getWorkCost();
-    _dryingCtrl.text = _wc.dryingCost.toStringAsFixed(0);
-    _mixingCtrl.text = _wc.mixingCost.toStringAsFixed(0);
-    _cuttingCtrl.text = _wc.cuttingCost.toStringAsFixed(0);
-    _lossCtrl.text = (_wc.cuttingLossRate * 100).toStringAsFixed(1);
-    _marginCtrl.text = (_wc.marginRate * 100).toStringAsFixed(1);
+    final wc = DataService.getWorkCost();
+    _wc = wc;
+    _dryingCtrl.text = wc.dryingCost.toStringAsFixed(0);
+    _mixingCtrl.text = wc.mixingCost.toStringAsFixed(0);
+    _cuttingCtrl.text = wc.cuttingCost.toStringAsFixed(0);
+    _lossCtrl.text = (wc.cuttingLossRate * 100).toStringAsFixed(1);
+    _marginCtrl.text = (wc.marginRate * 100).toStringAsFixed(1);
   }
 
   Future<void> _save() async {
-    final drying = double.tryParse(_dryingCtrl.text.trim()) ?? _wc.dryingCost;
-    final mixing = double.tryParse(_mixingCtrl.text.trim()) ?? _wc.mixingCost;
-    final cutting = double.tryParse(_cuttingCtrl.text.trim()) ?? _wc.cuttingCost;
-    final loss = (double.tryParse(_lossCtrl.text.trim()) ?? (_wc.cuttingLossRate * 100)) / 100.0;
-    final margin = (double.tryParse(_marginCtrl.text.trim()) ?? (_wc.marginRate * 100)) / 100.0;
+    final wc0 = _wc;
+    if (wc0 == null) return;
+    final drying = double.tryParse(_dryingCtrl.text.trim()) ?? wc0.dryingCost;
+    final mixing = double.tryParse(_mixingCtrl.text.trim()) ?? wc0.mixingCost;
+    final cutting = double.tryParse(_cuttingCtrl.text.trim()) ?? wc0.cuttingCost;
+    final loss = (double.tryParse(_lossCtrl.text.trim()) ?? (wc0.cuttingLossRate * 100)) / 100.0;
+    final margin = (double.tryParse(_marginCtrl.text.trim()) ?? (wc0.marginRate * 100)) / 100.0;
     final changedBy = DataService.currentWorker.isNotEmpty ? DataService.currentWorker : '관리자';
 
     final updated = WorkCost(
@@ -100,16 +112,6 @@ class _DryingCostTabState extends State<_DryingCostTab> {
       changedBy: changedBy,
     );
     await DataService.saveWorkCost(updated, changedBy: changedBy);
-    // Cloudflare 동기화 (실패해도 무시)
-    if (CloudflareService.isConfigured) {
-      await CloudflareService.saveWorkCost({
-        'dryingCost': drying,
-        'mixingCost': mixing,
-        'cuttingCost': cutting,
-        'cuttingLossRate': loss,
-        'marginRate': margin,
-      }, changedBy);
-    }
     setState(() { _wc = updated; _saved = true; });
     widget.onChanged();
     await Future.delayed(const Duration(seconds: 2));
@@ -117,14 +119,21 @@ class _DryingCostTabState extends State<_DryingCostTab> {
   }
 
   void _showHistory() {
+    final wc0 = _wc;
+    if (wc0 == null) return;
     showDialog(
       context: context,
-      builder: (_) => _WorkCostHistoryDialog(history: _wc.history),
+      builder: (_) => _WorkCostHistoryDialog(history: wc0.history),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    // 로딩 중이거나 _wc가 아직 null이면 스피너 표시
+    if (_loading || _wc == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final wc = _wc!;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: ConstrainedBox(
@@ -134,12 +143,12 @@ class _DryingCostTabState extends State<_DryingCostTab> {
           children: [
             _SectionCard(
               title: '동결 작업비 설정',
-              subtitle: '마지막 수정: ${Fmt.datetime(_wc.updatedAt)} (${_wc.changedBy})',
-              trailingButton: _wc.history.isNotEmpty
+              subtitle: '마지막 수정: ${Fmt.datetime(wc.updatedAt)} (${wc.changedBy})',
+              trailingButton: wc.history.isNotEmpty
                   ? TextButton.icon(
                       onPressed: () => _showHistory(),
                       icon: const Icon(Icons.history, size: 14),
-                      label: Text('변경이력 ${_wc.history.length}건', style: const TextStyle(fontSize: 12)),
+                      label: Text('변경이력 ${wc.history.length}건', style: const TextStyle(fontSize: 12)),
                     )
                   : null,
               child: Column(

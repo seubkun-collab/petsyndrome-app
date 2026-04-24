@@ -137,10 +137,10 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                     separatorBuilder: (_, __) => const Divider(height: 1),
                     itemBuilder: (ctx, i) {
                       final ing = items[i];
-                      // 수정된 계산식 적용 (마진+3%로스 포함)
-                      final singlePrice = CostCalculator.calcSingleRawCostPerKg(
+                      // 마진·최종로스 제외한 순수 원가 (목록 표시용)
+                      final singlePrice = CostCalculator.calcSingleRawCostNoMargin(
                           unitPrice: ing.unitPrice, moisture: ing.moisture, wc: wc);
-                      final mixedPrice = CostCalculator.calcMixedRawCostPerKg(
+                      final mixedPrice = CostCalculator.calcMixedRawCostNoMargin(
                           items: [_makeRecipeItem(ing)], ingredients: [ing], wc: wc);
                       final hasHist = ing.history.isNotEmpty;
 
@@ -320,16 +320,14 @@ class _FormulaDialog extends StatelessWidget {
     const finalLoss = CostCalculator.defaultFinalLossRate; // 3%
 
     // 단계별 계산
-    final step1 = (ing.unitPrice + wc.cuttingCost) / (1 - wc.cuttingLossRate);
-    final step2 = (step1 + wc.dryingCost) / (1 - ing.moisture);
     final mixingStep = isMixed ? wc.mixingCost : 0.0;
-    final step1m = (ing.unitPrice + mixingStep + wc.cuttingCost) / (1 - wc.cuttingLossRate);
-    final step2m = (step1m + wc.dryingCost) / (1 - ing.moisture);
-
-    final baseStep1 = isMixed ? step1m : step1;
-    final baseStep2 = isMixed ? step2m : step2;
-    final step3 = baseStep2 / (1 - wc.marginRate);
-    final step4 = step3 / (1 - finalLoss);
+    final baseStep1 = (ing.unitPrice + mixingStep + wc.cuttingCost) / (1 - wc.cuttingLossRate);
+    // STEP2 = 순수 원가 (마진 없음)
+    final pureCost = (baseStep1 + wc.dryingCost) / (1 - ing.moisture);
+    // STEP3 = 마진 적용
+    final step3 = pureCost / (1 - wc.marginRate);
+    // STEP4 = 최종 판매단가 (마진+로스)
+    final finalPrice = step3 / (1 - finalLoss);
 
     final formulaType = isMixed ? '배합' : '단미';
     final color = isMixed ? AppTheme.warning : AppTheme.primary;
@@ -338,7 +336,7 @@ class _FormulaDialog extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 540),
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -365,8 +363,8 @@ class _FormulaDialog extends StatelessWidget {
               _FormulaRow('최종로스율', '3% (고정)'),
               const Divider(height: 20),
 
-              // 수식
-              _SectionTitle('🔢 계산 단계'),
+              // ── 순수 원가 구간 ──
+              _SectionTitle('🔢 순수 원가 계산 (마진 제외)'),
               _StepBox(
                 step: 'STEP 1',
                 label: isMixed
@@ -381,41 +379,69 @@ class _FormulaDialog extends StatelessWidget {
                 step: 'STEP 2',
                 label: '(STEP1 + 건조비) ÷ (1 - 수분율)',
                 calc: '(${Fmt.won(baseStep1)} + ${Fmt.won(wc.dryingCost)}) ÷ (1 - ${(ing.moisture*100).toStringAsFixed(1)}%)',
-                result: '= ${Fmt.won(baseStep2)}',
+                result: '= ${Fmt.won(pureCost)}',
+                highlight: true,
               ),
+
+              // 순수 원가 요약 박스
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: color.withValues(alpha: 0.3)),
+                ),
+                child: Row(children: [
+                  Icon(Icons.arrow_right, color: color, size: 16),
+                  const SizedBox(width: 4),
+                  Text('$formulaType 순수 원가 ', style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+                  Text(Fmt.won(pureCost),
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: color)),
+                  Text('/kg', style: TextStyle(fontSize: 11, color: color)),
+                  const SizedBox(width: 6),
+                  const Text('← 목록 표시 기준', style: TextStyle(fontSize: 10, color: AppTheme.textSecondary)),
+                ]),
+              ),
+
+              const Divider(height: 16),
+
+              // ── 최종 판매단가 구간 ──
+              _SectionTitle('💰 최종 판매단가 (마진+로스 포함)'),
               _StepBox(
                 step: 'STEP 3',
-                label: 'STEP2 ÷ (1 - 마진율)',
-                calc: '${Fmt.won(baseStep2)} ÷ (1 - ${(wc.marginRate*100).toStringAsFixed(1)}%)',
+                label: '순수원가 ÷ (1 - 마진율)',
+                calc: '${Fmt.won(pureCost)} ÷ (1 - ${(wc.marginRate*100).toStringAsFixed(1)}%)',
                 result: '= ${Fmt.won(step3)}',
               ),
               _StepBox(
                 step: 'STEP 4',
                 label: 'STEP3 ÷ (1 - 최종로스율 3%)',
                 calc: '${Fmt.won(step3)} ÷ (1 - 3%)',
-                result: '= ${Fmt.won(step4)}',
+                result: '= ${Fmt.won(finalPrice)}',
                 highlight: true,
               ),
               const SizedBox(height: 8),
 
-              // 최종 공식 요약
+              // 최종 판매단가 요약 박스
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.06),
+                  color: Colors.orange.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: color.withValues(alpha: 0.3)),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
                 ),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('최종 $formulaType 원가/kg', style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+                  const Text('최종 판매단가/kg (마진+로스 포함)',
+                      style: TextStyle(fontSize: 11, color: Colors.orange, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
-                  Text(Fmt.won(step4),
-                      style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: color)),
+                  Text(Fmt.won(finalPrice),
+                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Colors.orange)),
                   const SizedBox(height: 4),
                   Text(
                     isMixed
-                        ? '= (((원물가+배합비+절단비)/(1-절단로스)+건조비)/(1-수분))/(1-마진)/(1-3%로스)'
-                        : '= (((원물가+절단비)/(1-절단로스)+건조비)/(1-수분))/(1-마진)/(1-3%로스)',
+                        ? '= 순수원가/(1-마진)/(1-3%로스)'
+                        : '= 순수원가/(1-마진)/(1-3%로스)',
                     style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary, fontFamily: 'monospace'),
                   ),
                 ]),
