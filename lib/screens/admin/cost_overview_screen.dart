@@ -37,6 +37,17 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
     showDialog(context: context, builder: (_) => _CostHistoryDialog(ingredient: ing));
   }
 
+  // 단가 수정 팝업
+  void _openEdit(Ingredient ing) {
+    showDialog(
+      context: context,
+      builder: (_) => _QuickEditDialog(
+        ingredient: ing,
+        onSaved: () => setState(() {}),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final wc = DataService.getWorkCost();
@@ -125,6 +136,7 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
               Expanded(flex: 3, child: Text('단미원가/kg ⓘ', style: AppText.label)),
               Expanded(flex: 3, child: Text('배합원가/kg ⓘ', style: AppText.label)),
               Expanded(flex: 3, child: Text('수정일(이력)', style: AppText.label)),
+              SizedBox(width: 40),
             ]),
           ),
           const Divider(height: 1),
@@ -147,7 +159,7 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                       if (isWide) {
                         return Container(
                           color: AppTheme.surface,
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                           child: Row(children: [
                             SizedBox(width: 56, child: _TypeBadge(type: ing.type)),
                             Expanded(flex: 3, child: Text(ing.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))),
@@ -190,6 +202,18 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                                 ],
                               ]),
                             )),
+                            // 수정 버튼
+                            SizedBox(
+                              width: 40,
+                              child: IconButton(
+                                icon: const Icon(Icons.edit_outlined, size: 16),
+                                color: AppTheme.textSecondary,
+                                tooltip: '단가 수정',
+                                onPressed: () => _openEdit(ing),
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                            ),
                           ]),
                         );
                       }
@@ -253,6 +277,14 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                                       style: const TextStyle(fontSize: 12, color: AppTheme.warning, fontWeight: FontWeight.w600)),
                                 ]),
                               ),
+                            ),
+                            const Spacer(),
+                            // 수정 버튼 (모바일)
+                            TextButton.icon(
+                              onPressed: () => _openEdit(ing),
+                              icon: const Icon(Icons.edit_outlined, size: 14),
+                              label: const Text('수정', style: TextStyle(fontSize: 12)),
+                              style: TextButton.styleFrom(foregroundColor: AppTheme.textSecondary, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
                             ),
                           ]),
                         ]),
@@ -600,5 +632,136 @@ class _FBtn extends StatelessWidget {
       decoration: BoxDecoration(color: sel ? AppTheme.primary : Colors.transparent, borderRadius: BorderRadius.circular(6), border: Border.all(color: sel ? AppTheme.primary : AppTheme.border)),
       child: Text(label, style: TextStyle(fontSize: 12, color: sel ? Colors.white : AppTheme.textSecondary, fontWeight: sel ? FontWeight.w600 : FontWeight.normal)),
     ));
+  }
+}
+
+// ══════════════════════════════════════════════════
+// 단가 빠른 수정 다이얼로그
+// ══════════════════════════════════════════════════
+class _QuickEditDialog extends StatefulWidget {
+  final Ingredient ingredient;
+  final VoidCallback onSaved;
+  const _QuickEditDialog({required this.ingredient, required this.onSaved});
+  @override
+  State<_QuickEditDialog> createState() => _QuickEditDialogState();
+}
+
+class _QuickEditDialogState extends State<_QuickEditDialog> {
+  late final TextEditingController _priceCtrl;
+  late final TextEditingController _moistureCtrl;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _priceCtrl = TextEditingController(text: widget.ingredient.unitPrice.toStringAsFixed(0));
+    _moistureCtrl = TextEditingController(
+        text: (widget.ingredient.moisture * 100).toStringAsFixed(1));
+  }
+
+  @override
+  void dispose() {
+    _priceCtrl.dispose();
+    _moistureCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final price = double.tryParse(_priceCtrl.text.trim());
+    final moisture = double.tryParse(_moistureCtrl.text.trim());
+    if (price == null || moisture == null) return;
+    setState(() => _saving = true);
+    final ing = widget.ingredient;
+    final updated = Ingredient(
+      id: ing.id,
+      name: ing.name,
+      type: ing.type,
+      unitPrice: price,
+      moisture: moisture / 100.0,
+      crudeProtein: ing.crudeProtein,
+      crudeFat: ing.crudeFat,
+      crudeAsh: ing.crudeAsh,
+      crudeFiber: ing.crudeFiber,
+      calcium: ing.calcium,
+      phosphorus: ing.phosphorus,
+      bulkWeightKg: ing.bulkWeightKg,
+      createdAt: ing.createdAt,
+    );
+    await DataService.saveIngredient(updated);
+    widget.onSaved();
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(children: [
+                const Icon(Icons.edit_outlined, size: 18, color: AppTheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('${widget.ingredient.name} 수정',
+                      style: AppText.heading3, overflow: TextOverflow.ellipsis),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(context),
+                  iconSize: 20,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ]),
+              const Divider(height: 20),
+              // 원물단가
+              const Text('원물단가 (원/kg)', style: AppText.label),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _priceCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  suffixText: '원/kg',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                autofocus: true,
+              ),
+              const SizedBox(height: 14),
+              // 수분율
+              const Text('수분율 (%)', style: AppText.label),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _moistureCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  suffixText: '%',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.save_outlined, size: 16),
+                label: Text(_saving ? '저장 중...' : '저장'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primary,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
