@@ -72,13 +72,14 @@ class IngredientAdapter extends TypeAdapter<Ingredient> {
       updatedAt: fields[13] as DateTime? ?? DateTime.now(),
       bulkWeightKg: fields[14] as double? ?? 10.0,
       history: (fields[15] as List?)?.cast<IngredientHistory>() ?? [],
+      ref300ccWeightG: fields[16] as double? ?? 0.0,
     );
   }
 
   @override
   void write(BinaryWriter writer, Ingredient obj) {
     writer
-      ..writeByte(16)
+      ..writeByte(17)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -110,7 +111,9 @@ class IngredientAdapter extends TypeAdapter<Ingredient> {
       ..writeByte(14)
       ..write(obj.bulkWeightKg)
       ..writeByte(15)
-      ..write(obj.history);
+      ..write(obj.history)
+      ..writeByte(16)
+      ..write(obj.ref300ccWeightG);
   }
 
   @override

@@ -1,11 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../services/data_service.dart';
+import '../../services/cloudflare_service.dart';
 import '../../utils/theme.dart';
 
-class AdminShell extends StatelessWidget {
+class AdminShell extends StatefulWidget {
   final Widget child;
   const AdminShell({super.key, required this.child});
+
+  @override
+  State<AdminShell> createState() => _AdminShellState();
+}
+
+class _AdminShellState extends State<AdminShell> {
+  int _pendingCount = 0;
 
   static final _navItems = [
     _NavItem(icon: Icons.inventory_2_outlined, label: '원물 관리', route: '/admin/ingredients'),
@@ -16,6 +24,19 @@ class AdminShell extends StatelessWidget {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _loadPending();
+  }
+
+  Future<void> _loadPending() async {
+    try {
+      final list = await CloudflareService.getPendingAccounts();
+      if (mounted) setState(() => _pendingCount = list.length);
+    } catch (_) {}
+  }
+
+  @override
   Widget build(BuildContext context) {
     final location = GoRouterState.of(context).matchedLocation;
     final isWide = MediaQuery.of(context).size.width > 800;
@@ -24,9 +45,9 @@ class AdminShell extends StatelessWidget {
       return Scaffold(
         body: Row(
           children: [
-            _SideBar(location: location, navItems: _navItems),
+            _SideBar(location: location, navItems: _navItems, pendingCount: _pendingCount),
             const VerticalDivider(width: 1),
-            Expanded(child: child),
+            Expanded(child: widget.child),
           ],
         ),
       );
@@ -34,8 +55,8 @@ class AdminShell extends StatelessWidget {
 
     return Scaffold(
       appBar: _buildAppBar(context, location),
-      drawer: _DrawerNav(location: location, navItems: _navItems),
-      body: child,
+      drawer: _DrawerNav(location: location, navItems: _navItems, pendingCount: _pendingCount),
+      body: widget.child,
     );
   }
 
@@ -44,6 +65,27 @@ class AdminShell extends StatelessWidget {
     return AppBar(
       title: Text(current?.label ?? '관리자'),
       actions: [
+        if (_pendingCount > 0)
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: Stack(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.notifications_outlined, size: 20),
+                  tooltip: '승인 대기 $_pendingCount건',
+                  onPressed: () => context.go('/admin/settings'),
+                ),
+                Positioned(
+                  top: 6, right: 6,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: const BoxDecoration(color: AppTheme.danger, shape: BoxShape.circle),
+                    child: Text('$_pendingCount', style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w800)),
+                  ),
+                ),
+              ],
+            ),
+          ),
         IconButton(
           icon: const Icon(Icons.open_in_new, size: 18),
           tooltip: '고객 페이지',
@@ -57,7 +99,8 @@ class AdminShell extends StatelessWidget {
 class _SideBar extends StatelessWidget {
   final String location;
   final List<_NavItem> navItems;
-  const _SideBar({required this.location, required this.navItems});
+  final int pendingCount;
+  const _SideBar({required this.location, required this.navItems, this.pendingCount = 0});
 
   @override
   Widget build(BuildContext context) {
@@ -103,7 +146,8 @@ class _SideBar extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
               children: navItems.map((item) {
                 final selected = location == item.route;
-                return _SideNavTile(item: item, selected: selected);
+                final badge = item.route == '/admin/settings' && pendingCount > 0 ? pendingCount : 0;
+                return _SideNavTile(item: item, selected: selected, badge: badge);
               }).toList(),
             ),
           ),
@@ -139,7 +183,8 @@ class _SideNavTile extends StatelessWidget {
   final _NavItem item;
   final bool selected;
   final VoidCallback? onTap;
-  const _SideNavTile({required this.item, required this.selected, this.onTap});
+  final int badge;
+  const _SideNavTile({required this.item, required this.selected, this.onTap, this.badge = 0});
 
   @override
   Widget build(BuildContext context) {
@@ -157,12 +202,20 @@ class _SideNavTile extends StatelessWidget {
               children: [
                 Icon(item.icon, size: 18, color: selected ? AppTheme.primary : AppTheme.textSecondary),
                 const SizedBox(width: 10),
-                Text(item.label,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                      color: selected ? AppTheme.primary : AppTheme.textPrimary,
-                    )),
+                Expanded(
+                  child: Text(item.label,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                        color: selected ? AppTheme.primary : AppTheme.textPrimary,
+                      )),
+                ),
+                if (badge > 0)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(color: AppTheme.danger, borderRadius: BorderRadius.circular(10)),
+                    child: Text('$badge', style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w800)),
+                  ),
               ],
             ),
           ),
@@ -175,7 +228,8 @@ class _SideNavTile extends StatelessWidget {
 class _DrawerNav extends StatelessWidget {
   final String location;
   final List<_NavItem> navItems;
-  const _DrawerNav({required this.location, required this.navItems});
+  final int pendingCount;
+  const _DrawerNav({required this.location, required this.navItems, this.pendingCount = 0});
 
   @override
   Widget build(BuildContext context) {
@@ -199,7 +253,8 @@ class _DrawerNav extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               children: navItems.map((item) {
                 final selected = location == item.route;
-                return _SideNavTile(item: item, selected: selected);
+                final badge = item.route == '/admin/settings' && pendingCount > 0 ? pendingCount : 0;
+                return _SideNavTile(item: item, selected: selected, badge: badge);
               }).toList(),
             ),
           ),

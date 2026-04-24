@@ -4,7 +4,7 @@ part of 'packaging.dart';
 
 class PackagingHistoryAdapter extends TypeAdapter<PackagingHistory> {
   @override
-  final int typeId = 5;
+  final int typeId = 7;
 
   @override
   PackagingHistory read(BinaryReader reader) {

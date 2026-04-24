@@ -75,6 +75,9 @@ class Ingredient extends HiveObject {
   @HiveField(15)
   List<IngredientHistory> history; // 단가/수분율 변동 이력
 
+  @HiveField(16)
+  double ref300ccWeightG; // 300cc 기준 담기는 중량 (g), 기본 0 (미설정)
+
   Ingredient({
     required this.id,
     required this.name,
@@ -89,6 +92,7 @@ class Ingredient extends HiveObject {
     this.calcium,
     this.isActive = true,
     this.bulkWeightKg = 10.0,
+    this.ref300ccWeightG = 0.0,
     List<IngredientHistory>? history,
     DateTime? createdAt,
     DateTime? updatedAt,

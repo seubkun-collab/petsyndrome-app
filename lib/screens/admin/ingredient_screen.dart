@@ -17,6 +17,19 @@ class IngredientScreen extends StatefulWidget {
 class _IngredientScreenState extends State<IngredientScreen> {
   String _filter = 'all';
   String _search = '';
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() => _loading = true);
+    await DataService.refreshAll();
+    if (mounted) setState(() => _loading = false);
+  }
 
   List<Ingredient> get _filtered {
     var list = DataService.getIngredients(activeOnly: false);
@@ -56,6 +69,8 @@ class _IngredientScreenState extends State<IngredientScreen> {
       appBar: AppBar(
         title: const Text('원물 관리'),
         actions: [
+          if (_loading) const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+          IconButton(icon: const Icon(Icons.refresh, size: 20), tooltip: '새로고침', onPressed: _refresh),
           ElevatedButton.icon(onPressed: () => _openForm(), icon: const Icon(Icons.add, size: 16), label: const Text('원물 추가')),
           const SizedBox(width: 16),
         ],
@@ -334,6 +349,7 @@ class _IngredientFormDialogState extends State<_IngredientFormDialog> {
   final _calciumCtrl = TextEditingController();
   final _phosphorusCtrl = TextEditingController();
   final _bulkCtrl = TextEditingController();
+  final _ref300Ctrl = TextEditingController();
 
   @override
   void initState() {
@@ -351,8 +367,10 @@ class _IngredientFormDialogState extends State<_IngredientFormDialog> {
       _calciumCtrl.text = i.calcium?.toStringAsFixed(2) ?? '';
       _phosphorusCtrl.text = i.phosphorus?.toStringAsFixed(2) ?? '';
       _bulkCtrl.text = i.bulkWeightKg.toStringAsFixed(0);
+      _ref300Ctrl.text = i.ref300ccWeightG > 0 ? i.ref300ccWeightG.toStringAsFixed(0) : '';
     } else {
       _bulkCtrl.text = '10';
+      _ref300Ctrl.text = '';
     }
   }
 
@@ -457,6 +475,7 @@ class _IngredientFormDialogState extends State<_IngredientFormDialog> {
       calcium: _opt(_calciumCtrl.text),
       phosphorus: _opt(_phosphorusCtrl.text),
       bulkWeightKg: double.tryParse(_bulkCtrl.text.trim()) ?? 10.0,
+      ref300ccWeightG: double.tryParse(_ref300Ctrl.text.trim()) ?? 0.0,
       createdAt: widget.ingredient?.createdAt,
     );
     await DataService.saveIngredient(ing);
@@ -522,7 +541,8 @@ class _IngredientFormDialogState extends State<_IngredientFormDialog> {
                 ]),
                 Row(children: [
                   Expanded(child: _field('벌크 포장 중량', _bulkCtrl, suffix: 'kg', hint: '기본 10')),
-                  const Expanded(child: SizedBox()),
+                  const SizedBox(width: 10),
+                  Expanded(child: _field('300cc 기준 중량', _ref300Ctrl, suffix: 'g', hint: '미설정시 빈칸')),
                 ]),
                 const Divider(),
                 const SizedBox(height: 8),

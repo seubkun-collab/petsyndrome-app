@@ -132,7 +132,8 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
               SizedBox(width: 56, child: Text('구분', style: AppText.label)),
               Expanded(flex: 3, child: Text('원물명', style: AppText.label)),
               Expanded(flex: 2, child: Text('원물단가', style: AppText.label)),
-              Expanded(flex: 2, child: Text('수분율', style: AppText.label)),
+              Expanded(flex: 2, child: Text('수율', style: AppText.label)),
+              Expanded(flex: 2, child: Text('300cc기준(g)', style: AppText.label)),
               Expanded(flex: 3, child: Text('단미원가/kg ⓘ', style: AppText.label)),
               Expanded(flex: 3, child: Text('배합원가/kg ⓘ', style: AppText.label)),
               Expanded(flex: 3, child: Text('수정일(이력)', style: AppText.label)),
@@ -164,7 +165,11 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                             SizedBox(width: 56, child: _TypeBadge(type: ing.type)),
                             Expanded(flex: 3, child: Text(ing.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500))),
                             Expanded(flex: 2, child: Text(Fmt.won(ing.unitPrice), style: const TextStyle(fontSize: 13))),
-                            Expanded(flex: 2, child: Text(Fmt.pct(ing.moisture), style: const TextStyle(fontSize: 13))),
+                            Expanded(flex: 2, child: Text('${((1-ing.moisture)*100).toStringAsFixed(1)}%', style: const TextStyle(fontSize: 13))),
+                            Expanded(flex: 2, child: Text(
+                              ing.ref300ccWeightG > 0 ? '${ing.ref300ccWeightG.toStringAsFixed(0)}g' : '-',
+                              style: TextStyle(fontSize: 13, color: ing.ref300ccWeightG > 0 ? AppTheme.textPrimary : AppTheme.textSecondary),
+                            )),
                             // 단미원가 - 클릭 가능
                             Expanded(flex: 3, child: GestureDetector(
                               onTap: () => _showFormulaDetail(ctx, ing, false),
@@ -239,7 +244,8 @@ class _CostOverviewScreenState extends State<CostOverviewScreen> {
                           const SizedBox(height: 6),
                           Wrap(spacing: 12, runSpacing: 4, children: [
                             _IChip('원물단가', '${Fmt.won(ing.unitPrice)}/kg'),
-                            _IChip('수분율', Fmt.pct(ing.moisture)),
+                            _IChip('수율', '${((1-ing.moisture)*100).toStringAsFixed(1)}%'),
+                            if (ing.ref300ccWeightG > 0) _IChip('300cc기준', '${ing.ref300ccWeightG.toStringAsFixed(0)}g'),
                           ]),
                           const SizedBox(height: 6),
                           Row(children: [
@@ -734,7 +740,7 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
                 autofocus: true,
               ),
               const SizedBox(height: 14),
-              // 수분율
+              // 수분율 (수율 자동 표시)
               const Text('수분율 (%)', style: AppText.label),
               const SizedBox(height: 6),
               TextField(

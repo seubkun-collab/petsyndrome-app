@@ -2,7 +2,7 @@ import 'package:hive/hive.dart';
 
 part 'packaging.g.dart';
 
-@HiveType(typeId: 5)
+@HiveType(typeId: 7)
 class PackagingHistory extends HiveObject {
   @HiveField(0)
   DateTime changedAt;

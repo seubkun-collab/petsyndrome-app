@@ -8,6 +8,7 @@ import '../../models/ingredient.dart';
 import '../../models/packaging.dart';
 import '../../models/recipe.dart';
 import '../../services/data_service.dart';
+import '../../services/cloudflare_service.dart';
 import '../../services/cost_calculator.dart';
 import '../../utils/theme.dart';
 import '../../utils/formatter.dart';
@@ -120,7 +121,15 @@ class _CustomerScreenState extends State<CustomerScreen> {
   @override
   void initState() {
     super.initState();
-    _loadHistory();
+    _refreshAndLoad();
+  }
+
+  Future<void> _refreshAndLoad() async {
+    await DataService.refreshAll();
+    if (mounted) {
+      setState(() {});
+      _loadHistory();
+    }
   }
 
   void _loadHistory() {
@@ -205,8 +214,9 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   void _calculate() {
-    if (_workerCtrl.text.trim().isEmpty) {
-      _showSnack('작업자 이름을 입력해주세요.');
+    if (!_isWorkerLoggedIn) {
+      _showSnack('계산 전 작업자 로그인이 필요합니다.');
+      _showWorkerLoginDialog();
       return;
     }
 
@@ -443,6 +453,34 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   // 다시 계산
+  /// 현재 선택 원료의 가중평균 수율(0~1)을 반환
+  double _computeYieldRate() {
+    if (!_isMixed && _selectedIngredient != null) {
+      return 1 - _selectedIngredient!.moisture;
+    } else if (_isMixed && _mixItems.isNotEmpty) {
+      double wm = 0, total = 0;
+      for (final it in _mixItems) {
+        if (it.ingredient == null) continue;
+        final r = double.tryParse(it.ratioCtrl.text) ?? 0;
+        wm += it.ingredient!.moisture * r;
+        total += r;
+      }
+      if (total <= 0) return 0;
+      return 1 - wm / total;
+    }
+    return 0;
+  }
+
+  String _computeIngredientLabel() {
+    if (!_isMixed && _selectedIngredient != null) return _selectedIngredient!.name;
+    if (_isMixed && _mixItems.isNotEmpty) {
+      return _mixItems.where((it) => it.ingredient != null)
+          .map((it) => '${it.ingredient!.name}(${it.ratioCtrl.text}%)')
+          .join('+');
+    }
+    return '';
+  }
+
   void _resetForm() {
     setState(() {
       _result = null;
@@ -464,98 +502,124 @@ class _CustomerScreenState extends State<CustomerScreen> {
   void _showWorkerLoginDialog() {
     final nameCtrl = TextEditingController(text: _workerCtrl.text.trim());
     final pinCtrl = TextEditingController();
+    bool loading = false;
     String? errorMsg;
 
     showDialog(
       context: context,
       barrierDismissible: true,
       builder: (dialogCtx) => StatefulBuilder(
-        builder: (ctx, setDlgState) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Row(
-            children: [
-              Icon(Icons.lock_outline, color: AppTheme.primary, size: 20),
-              SizedBox(width: 8),
-              Text('작업자 로그인', style: AppText.heading3),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('이름과 PIN 번호로 로그인하면\n본인 견적 이력만 확인할 수 있습니다.',
-                  style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-              const SizedBox(height: 16),
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: '작업자 이름',
-                  prefixIcon: Icon(Icons.person_outline, size: 18),
-                  isDense: true,
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: pinCtrl,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'PIN 번호',
-                  prefixIcon: Icon(Icons.lock_outline, size: 18),
-                  isDense: true,
-                ),
-                onSubmitted: (_) async {
-                  final name = nameCtrl.text.trim();
-                  final pin = pinCtrl.text.trim();
-                  if (name.isEmpty || pin.isEmpty) return;
-                  if (DataService.checkWorkerLogin(name, pin) || DataService.checkLogin(name, pin)) {
-                    if (!dialogCtx.mounted) return;
-                    Navigator.pop(dialogCtx);
-                    setState(() {
-                      _isWorkerLoggedIn = true;
-                      _loggedInWorker = name;
-                      _workerCtrl.text = name;
-                    });
-                    _loadHistory();
-                  } else {
-                    setDlgState(() => errorMsg = '이름 또는 PIN이 올바르지 않습니다.');
-                  }
-                },
-              ),
-              if (errorMsg != null) ...[
-                const SizedBox(height: 8),
-                Text(errorMsg!, style: const TextStyle(fontSize: 11, color: AppTheme.danger)),
+        builder: (ctx, setDlgState) {
+
+          Future<void> doLogin() async {
+            final name = nameCtrl.text.trim();
+            final pin = pinCtrl.text.trim();
+            if (name.isEmpty || pin.isEmpty) {
+              setDlgState(() => errorMsg = '이름과 PIN을 모두 입력하세요');
+              return;
+            }
+            setDlgState(() { loading = true; errorMsg = null; });
+            bool success = false;
+            // 서버 로그인 시도 (staff 또는 admin)
+            try {
+              final res = await CloudflareService.loginAccount(name: name, pin: pin, role: 'staff');
+              success = res['ok'] == true;
+              if (!success && res['error'] != null) {
+                setDlgState(() { loading = false; errorMsg = res['error'] as String?; });
+                return;
+              }
+            } catch (_) {
+              // 서버 실패 시 로컬 체크로 폴백
+              success = DataService.checkWorkerLogin(name, pin) || DataService.checkLogin(name, pin);
+            }
+            if (!ctx.mounted) return;
+            if (success) {
+              Navigator.pop(dialogCtx);
+              setState(() {
+                _isWorkerLoggedIn = true;
+                _loggedInWorker = name;
+                _workerCtrl.text = name;
+              });
+              _loadHistory();
+            } else {
+              setDlgState(() { loading = false; errorMsg = '이름 또는 PIN이 올바르지 않습니다.'; });
+            }
+          }
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Row(
+              children: [
+                Icon(Icons.lock_outline, color: AppTheme.primary, size: 20),
+                SizedBox(width: 8),
+                Text('작업자 로그인', style: AppText.heading3),
               ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('이름과 PIN 번호로 로그인하면\n견적 계산 및 이력 관리가 가능합니다.',
+                    style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '작업자 이름',
+                    prefixIcon: Icon(Icons.person_outline, size: 18),
+                    isDense: true,
+                  ),
+                  onSubmitted: (_) => doLogin(),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: pinCtrl,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'PIN 번호',
+                    prefixIcon: Icon(Icons.lock_outline, size: 18),
+                    isDense: true,
+                  ),
+                  onSubmitted: (_) => doLogin(),
+                ),
+                if (errorMsg != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppTheme.danger.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(errorMsg!, style: const TextStyle(fontSize: 11, color: AppTheme.danger)),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Row(children: [
+                  const Text('계정이 없으신가요?', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                  const SizedBox(width: 4),
+                  GestureDetector(
+                    onTap: () {
+                      Navigator.pop(dialogCtx);
+                      context.push('/admin/login');
+                    },
+                    child: const Text('가입 신청하기 →', style: TextStyle(fontSize: 11, color: AppTheme.primary, fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: loading ? null : () => Navigator.pop(dialogCtx),
+                child: const Text('취소'),
+              ),
+              ElevatedButton(
+                onPressed: loading ? null : doLogin,
+                child: loading
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Text('로그인'),
+              ),
             ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
-              child: const Text('취소'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final name = nameCtrl.text.trim();
-                final pin = pinCtrl.text.trim();
-                if (name.isEmpty || pin.isEmpty) {
-                  setDlgState(() => errorMsg = '이름과 PIN을 모두 입력하세요');
-                  return;
-                }
-                if (DataService.checkWorkerLogin(name, pin) || DataService.checkLogin(name, pin)) {
-                  if (!dialogCtx.mounted) return;
-                  Navigator.pop(dialogCtx);
-                  setState(() {
-                    _isWorkerLoggedIn = true;
-                    _loggedInWorker = name;
-                    _workerCtrl.text = name;
-                  });
-                  _loadHistory();
-                } else {
-                  setDlgState(() => errorMsg = '이름 또는 PIN이 올바르지 않습니다.');
-                }
-              },
-              child: const Text('로그인'),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -721,6 +785,8 @@ class _CustomerScreenState extends State<CustomerScreen> {
                         selected: _packagingType,
                         allowed: _allowedPackagingTypes,
                         weightCat: _weightCat,
+                        yieldRate: _computeYieldRate(),
+                        ingredientLabel: _computeIngredientLabel(),
                         onChanged: (v) => setState(() {
                           _packagingType = v;
                           _result = null;
@@ -729,8 +795,34 @@ class _CustomerScreenState extends State<CustomerScreen> {
                     ),
                     const SizedBox(height: 18),
 
+                    // 로그인 필요 안내
+                    if (!_isWorkerLoggedIn) ...[
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppTheme.warning.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppTheme.warning.withValues(alpha: 0.3)),
+                        ),
+                        child: Row(children: [
+                          const Icon(Icons.lock_outline, size: 16, color: AppTheme.warning),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(
+                            '견적 계산을 위해 작업자 로그인이 필요합니다.',
+                            style: const TextStyle(fontSize: 12, color: AppTheme.warning),
+                          )),
+                          TextButton(
+                            onPressed: _showWorkerLoginDialog,
+                            child: const Text('로그인', style: TextStyle(fontSize: 12)),
+                            style: TextButton.styleFrom(foregroundColor: AppTheme.primary, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                          ),
+                        ]),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+
                     ElevatedButton(
-                      onPressed: _calculate,
+                      onPressed: _isWorkerLoggedIn ? _calculate : null,
                       style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         textStyle: const TextStyle(
@@ -762,6 +854,18 @@ class _CustomerScreenState extends State<CustomerScreen> {
                                 ? _selectedIngredient!.bulkWeightKg
                                 : 10.0)
                             : null,
+                        recipeItems: _isMixed
+                            ? _mixItems.where((it) => it.ingredient != null).map((it) => RecipeItem(
+                                ingredientId: it.ingredient!.id,
+                                ingredientName: it.ingredient!.name,
+                                ratio: double.tryParse(it.ratioCtrl.text) ?? 0,
+                              )).toList()
+                            : _selectedIngredient != null ? [RecipeItem(
+                                ingredientId: _selectedIngredient!.id,
+                                ingredientName: _selectedIngredient!.name,
+                                ratio: 100,
+                              )] : [],
+                        ingredients: _ingredients,
                       ),
                     ],
 
@@ -1167,7 +1271,7 @@ class _SinglePicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DropdownButtonFormField<Ingredient>(
-      initialValue: selected,
+      value: selected,
       hint: const Text('원료를 선택해주세요'),
       isExpanded: true,
       decoration: const InputDecoration(isDense: true),
@@ -1319,7 +1423,7 @@ class _MixRow extends StatelessWidget {
           Expanded(
             flex: 5,
             child: DropdownButtonFormField<Ingredient>(
-              initialValue: item.ingredient,
+              value: item.ingredient,
               hint: const Text('원료 선택',
                   style: TextStyle(fontSize: 12)),
               isExpanded: true,
@@ -1502,12 +1606,16 @@ class _PackagingPicker extends StatelessWidget {
   final String selected;
   final List<String> allowed;
   final WeightCategory weightCat;
+  final double yieldRate;        // 0~1, 수율
+  final String ingredientLabel;  // 표시용 원료명
   final ValueChanged<String> onChanged;
   const _PackagingPicker(
       {required this.selected,
       required this.allowed,
       required this.weightCat,
-      required this.onChanged});
+      required this.onChanged,
+      this.yieldRate = 0,
+      this.ingredientLabel = ''});
 
   @override
   Widget build(BuildContext context) {
@@ -1530,6 +1638,17 @@ class _PackagingPicker extends StatelessWidget {
       helperText = '벌크: 비닐 포장만 가능';
     }
 
+    // 통 포장 선택 시 용기별 예상 건조 중량 표시
+    final showContainerGuide = selected == 'container' && yieldRate > 0;
+    final containers = [
+      (300, '300cc'),
+      (400, '400cc'),
+      (500, '500cc'),
+      (600, '600cc'),
+      (700, '700cc'),
+      (1000, '1000cc'),
+    ];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1551,6 +1670,68 @@ class _PackagingPicker extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         Text(helperText, style: AppText.bodySmall),
+
+        // 통 포장 선택 시 → 용기 크기별 예상 건조 중량 참고표
+        if (showContainerGuide) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppTheme.primary.withValues(alpha: 0.15)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const Icon(Icons.info_outline, size: 13, color: AppTheme.primary),
+                  const SizedBox(width: 5),
+                  Text(
+                    '수율 ${(yieldRate * 100).toStringAsFixed(1)}% 기준 · 용기별 예상 건조 중량',
+                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppTheme.primary),
+                  ),
+                ]),
+                if (ingredientLabel.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2, bottom: 6),
+                    child: Text(
+                      '원료: $ingredientLabel',
+                      style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
+                    ),
+                  )
+                else
+                  const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: containers.map((c) {
+                    // 용기 cc ÷ 9 = 원료 투입 중량(g), × 수율 = 건조 중량(g)
+                    final rawG = c.$1 / 9.0;
+                    final dryG = rawG * yieldRate;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppTheme.surface,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: AppTheme.border),
+                      ),
+                      child: Text(
+                        '${c.$2} ≈ ${dryG.toStringAsFixed(0)}g',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  '※ 1cc ≈ 9g 원료 기준 근사값',
+                  style: TextStyle(fontSize: 9, color: AppTheme.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1613,6 +1794,8 @@ class _ResultCard extends StatelessWidget {
   final bool isMixed;
   final VoidCallback onReset;
   final double? bulkMoqKg;
+  final List<RecipeItem> recipeItems;
+  final List<Ingredient> ingredients;
 
   const _ResultCard({
     required this.result,
@@ -1625,15 +1808,48 @@ class _ResultCard extends StatelessWidget {
     required this.itemsLabel,
     required this.onReset,
     this.bulkMoqKg,
+    this.recipeItems = const [],
+    this.ingredients = const [],
   });
 
-  static void _showFormulaDialog(BuildContext context, CostResult result) {
+  void _showFormulaDialog(BuildContext context, CostResult result) {
+    // 수율 계산
+    double yieldRate = 0;
+    String yieldFormula = '';
+    if (!isMixed && ingredients.isNotEmpty && recipeItems.isNotEmpty) {
+      final ing = ingredients.where((i) => i.id == recipeItems.first.ingredientId).firstOrNull;
+      if (ing != null) {
+        yieldRate = (1 - ing.moisture) * 100;
+        yieldFormula = '${ing.name} 수분함량 ${(ing.moisture * 100).toStringAsFixed(1)}%\n수율 = 1 - ${(ing.moisture * 100).toStringAsFixed(1)}% = ${yieldRate.toStringAsFixed(1)}%';
+      }
+    } else if (isMixed && recipeItems.isNotEmpty) {
+      double weightedMoisture = 0;
+      double totalRatio = 0;
+      final parts = <String>[];
+      for (final item in recipeItems) {
+        final ing = ingredients.where((i) => i.id == item.ingredientId).firstOrNull;
+        if (ing == null) continue;
+        final r = item.ratio / 100.0;
+        weightedMoisture += ing.moisture * r;
+        totalRatio += r;
+        parts.add('${ing.name} 수분${(ing.moisture*100).toStringAsFixed(1)}%×${item.ratio.toStringAsFixed(0)}%');
+      }
+      if (totalRatio > 0) {
+        final avgMoisture = weightedMoisture / totalRatio;
+        yieldRate = (1 - avgMoisture) * 100;
+        yieldFormula = '배합 수분함량 = ${parts.join(' + ')}\n= ${(avgMoisture * 100).toStringAsFixed(1)}%\n수율 = 1 - ${(avgMoisture * 100).toStringAsFixed(1)}% = ${yieldRate.toStringAsFixed(1)}%';
+      }
+    }
+
+    // 영양성분 계산
+    final nutrition = CostCalculator.calcNutrition(items: recipeItems, allIngredients: ingredients);
+
     showDialog(
       context: context,
       builder: (_) => Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 560),
+          constraints: const BoxConstraints(maxWidth: 500, maxHeight: 620),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1645,9 +1861,9 @@ class _ResultCard extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.calculate_outlined, color: AppTheme.primary, size: 20),
+                    const Icon(Icons.science_outlined, color: AppTheme.primary, size: 20),
                     const SizedBox(width: 8),
-                    const Expanded(child: Text('원가 계산식 상세', style: AppText.heading3)),
+                    const Expanded(child: Text('수율 및 영양성분 분석', style: AppText.heading3)),
                     IconButton(
                       icon: const Icon(Icons.close, size: 18),
                       onPressed: () => Navigator.pop(_),
@@ -1663,49 +1879,130 @@ class _ResultCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (result.detailedFormula.isNotEmpty) ...[
+                      // ── 수율 섹션 ──
+                      _CustSectionTitle('📊 동결건조 수율'),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppTheme.primary.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppTheme.primary.withValues(alpha: 0.2)),
+                        ),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(yieldFormula, style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary, height: 1.6)),
+                          const SizedBox(height: 8),
+                          Row(children: [
+                            const Text('최종 수율  ', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(20)),
+                              child: Text('${yieldRate.toStringAsFixed(1)}%',
+                                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
+                            ),
+                          ]),
+                        ]),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // ── 예상 단가 ──
+                      _CustSectionTitle('💰 예상 단가'),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accent,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppTheme.primary.withValues(alpha: 0.3)),
+                        ),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                          const Text('포장당 예상 단가', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          Text(Fmt.won(result.unitPricePerPack),
+                              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: AppTheme.primary)),
+                        ]),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // ── 용기별 건조 중량 참고표 ──
+                      if (yieldRate > 0) ...[
+                        _CustSectionTitle('📦 용기 크기별 예상 건조 중량'),
                         Container(
-                          padding: const EdgeInsets.all(10),
+                          padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: AppTheme.background,
-                            borderRadius: BorderRadius.circular(8),
+                            color: const Color(0xFFF0F9FF),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFBAE6FD)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('수율 기준 · 통 포장 시 용량별 예상 건조 중량',
+                                style: TextStyle(fontSize: 11, color: Color(0xFF0369A1))),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: [300, 400, 500, 600, 700, 1000].map((cc) {
+                                  final rawG = cc / 9.0;
+                                  final dryG = rawG * (yieldRate / 100.0);
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: const Color(0xFF7DD3FC)),
+                                    ),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text('${cc}cc', style: const TextStyle(fontSize: 10, color: Color(0xFF0284C7), fontWeight: FontWeight.w600)),
+                                        Text('≈${dryG.toStringAsFixed(0)}g', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                              const SizedBox(height: 6),
+                              const Text('※ 1cc ≈ 9g 원료 기준, 수율 적용 근사값',
+                                style: TextStyle(fontSize: 9, color: AppTheme.textSecondary)),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                      ],
+
+                      // ── 영양성분 ──
+                      if (nutrition.isNotEmpty) ...[
+                        _CustSectionTitle('🧪 예상 영양성분 (건조 후 기준)'),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppTheme.surface,
+                            borderRadius: BorderRadius.circular(10),
                             border: Border.all(color: AppTheme.border),
                           ),
-                          child: Text(result.detailedFormula,
-                              style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary, height: 1.5)),
+                          child: Column(children: [
+                            if (nutrition['crudeProtein'] != null)
+                              _NutrRow('조단백질', '${nutrition['crudeProtein']!.toStringAsFixed(1)}%', Icons.fitness_center_outlined),
+                            if (nutrition['crudeFat'] != null)
+                              _NutrRow('조지방', '${nutrition['crudeFat']!.toStringAsFixed(1)}%', Icons.water_drop_outlined),
+                            if (nutrition['crudeAsh'] != null)
+                              _NutrRow('조회분', '${nutrition['crudeAsh']!.toStringAsFixed(1)}%', Icons.grain_outlined),
+                            if (nutrition['crudeFiber'] != null)
+                              _NutrRow('조섬유', '${nutrition['crudeFiber']!.toStringAsFixed(1)}%', Icons.grass_outlined),
+                            if (nutrition['calcium'] != null)
+                              _NutrRow('칼슘(Ca)', '${nutrition['calcium']!.toStringAsFixed(2)}%', Icons.circle_outlined),
+                            if (nutrition['phosphorus'] != null)
+                              _NutrRow('인(P)', '${nutrition['phosphorus']!.toStringAsFixed(2)}%', Icons.circle_outlined),
+                            _NutrRow('수분', '${((nutrition['moisture'] ?? 0) * 100).toStringAsFixed(1)}%', Icons.opacity_outlined),
+                          ]),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          '※ 영양성분은 원료 기준 추정값이며 가공 후 달라질 수 있습니다.',
+                          style: TextStyle(fontSize: 10, color: AppTheme.textSecondary),
                         ),
                         const SizedBox(height: 12),
                       ],
-                      const Text('단계별 계산', style: AppText.label),
-                      const SizedBox(height: 8),
-                      ...result.formulaSteps.asMap().entries.map((e) => Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: AppTheme.surface,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppTheme.border),
-                        ),
-                        child: Text(e.value,
-                            style: const TextStyle(fontSize: 12, fontFamily: 'monospace', height: 1.6, color: AppTheme.textPrimary)),
-                      )),
-                      const Divider(height: 16),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: AppTheme.primary.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text('최종 단가 (kg당)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                            Text(Fmt.won(result.unitPricePerKg) + '/kg',
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppTheme.primary)),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
+
                       Container(
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
@@ -1713,7 +2010,7 @@ class _ResultCard extends StatelessWidget {
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: const Text(
-                          '※ 본 계산식은 예상 수치이며, 실제 수율은\n샘플 가공 후 최종 확정됩니다.',
+                          '※ 본 분석은 예상 수치이며, 실제 수율 및 영양성분은\n샘플 가공 후 최종 확정됩니다.',
                           style: TextStyle(fontSize: 10, color: AppTheme.textSecondary, height: 1.5),
                         ),
                       ),
@@ -2018,4 +2315,30 @@ class _HistoryCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _CustSectionTitle extends StatelessWidget {
+  final String text;
+  const _CustSectionTitle(this.text);
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Text(text, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppTheme.textPrimary)),
+  );
+}
+
+class _NutrRow extends StatelessWidget {
+  final String label, value;
+  final IconData icon;
+  const _NutrRow(this.label, this.value, this.icon);
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(children: [
+      Icon(icon, size: 14, color: AppTheme.textSecondary),
+      const SizedBox(width: 8),
+      Expanded(child: Text(label, style: const TextStyle(fontSize: 12, color: AppTheme.textPrimary))),
+      Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.primary)),
+    ]),
+  );
 }
