@@ -520,4 +520,74 @@ class CloudflareService {
     }
     return [];
   }
+
+  // ── 이카운트 ERP 연동 ──
+  static Future<Map<String, dynamic>> icountGetSession({
+    required String companyCode,
+    required String userId,
+    required String password,
+    String zone = '1',
+  }) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/icount/session'),
+        headers: _headers,
+        body: jsonEncode({'companyCode': companyCode, 'userId': userId, 'password': password, 'zone': zone}),
+      ).timeout(_timeout);
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[CF] icountGetSession error: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
+  static Future<Map<String, dynamic>> icountSendEstimate({
+    required String sessionId,
+    required List<Map<String, dynamic>> items,
+    String zone = '1',
+  }) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/icount/estimate'),
+        headers: _headers,
+        body: jsonEncode({'sessionId': sessionId, 'zone': zone, 'estimateItems': items}),
+      ).timeout(_timeout);
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[CF] icountSendEstimate error: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
+  static Future<Map<String, dynamic>?> icountGetConfig() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/api/icount/config'), headers: _headers).timeout(_timeout);
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body);
+        return body == null ? null : body as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('[CF] icountGetConfig error: $e');
+    }
+    return null;
+  }
+
+  static Future<bool> icountSaveConfig({
+    required String companyCode,
+    required String userId,
+    required String password,
+    String zone = '1',
+  }) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/icount/config'),
+        headers: _headers,
+        body: jsonEncode({'companyCode': companyCode, 'userId': userId, 'password': password, 'zone': zone}),
+      ).timeout(_timeout);
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint('[CF] icountSaveConfig error: $e');
+      return false;
+    }
+  }
 }

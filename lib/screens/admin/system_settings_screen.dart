@@ -330,13 +330,13 @@ class _AccountCard extends StatelessWidget {
           ),
           const Spacer(),
           if (onDelete != null)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, size: 16),
-              color: AppTheme.danger,
-              onPressed: onDelete,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-              tooltip: '삭제',
+            InkWell(
+              onTap: onDelete,
+              borderRadius: BorderRadius.circular(20),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: const Icon(Icons.delete_outline, size: 18, color: AppTheme.danger),
+              ),
             ),
         ]),
         const SizedBox(height: 4),

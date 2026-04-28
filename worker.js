@@ -377,6 +377,94 @@ export default {
       return json({ status: 'ok', time: new Date().toISOString() });
     }
 
+    // ── 이카운트 ERP API 프록시 ──
+    // 세션 로그인 (회사코드 + USER_ID + PW → SESSION_ID 획득)
+    if (path === '/api/icount/session' && method === 'POST') {
+      const body = await request.json();
+      const { companyCode, userId, password, zone } = body;
+      if (!companyCode || !userId || !password) {
+        return err('companyCode, userId, password 가 필요합니다.');
+      }
+      const z = zone || '1';
+      try {
+        const res = await fetch(`https://oapi${z}.ecount.com/OAPI/V2/Session/GetSessionID`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            COM_CODE: companyCode,
+            USER_ID: userId,
+            PW: password,
+            ZONE: z,
+            LANG: 'ko_KR',
+            DEVICE_CATE: 'pc',
+            PUSH_TOKEN: '',
+          }),
+        });
+        const data = await res.json();
+        return json({ ok: data.Status === '200', data });
+      } catch (e) {
+        return err('이카운트 서버 연결 실패: ' + e.message, 500);
+      }
+    }
+
+    // 견적서 저장 (/api/icount/estimate)
+    if (path === '/api/icount/estimate' && method === 'POST') {
+      const body = await request.json();
+      const { sessionId, zone, estimateItems } = body;
+      if (!sessionId || !estimateItems) {
+        return err('sessionId 와 estimateItems 가 필요합니다.');
+      }
+      const z = zone || '1';
+      // 이카운트 견적서 API (EstimateList 사용)
+      // 이카운트 ERP에 견적서 기능이 없을 경우 판매입력(Sale)으로 대체 가능
+      const icountBody = {
+        SaleList: estimateItems.map((item, idx) => ({
+          Line: String(idx),
+          BulkDatas: {
+            IO_DATE: item.date || new Date().toISOString().slice(0,10).replace(/-/g,''),
+            CUST: item.customerCode || '',
+            CUST_DES: item.customerName || '',
+            PROD_CD: item.productCode || '',
+            PROD_DES: item.productName || '',
+            QTY: String(item.qty || 1),
+            PRICE: String(Math.round(item.unitPrice || 0)),
+            SUPPLY_AMT: String(Math.round((item.unitPrice || 0) * (item.qty || 1))),
+            REMARKS: item.note || '',
+            WH_CD: '',
+          },
+        })),
+      };
+      try {
+        const res = await fetch(`https://oapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(icountBody),
+        });
+        const data = await res.json();
+        return json({ ok: data.Status === '200', data });
+      } catch (e) {
+        return err('이카운트 서버 연결 실패: ' + e.message, 500);
+      }
+    }
+
+    // 이카운트 설정 저장/조회 (KV 저장)
+    if (path === '/api/icount/config' && method === 'GET') {
+      const cfg = await kvGet(kv, 'icount_config', null);
+      // 비밀번호는 마스킹
+      if (cfg) return json({ ...cfg, password: '***' });
+      return json(null);
+    }
+
+    if (path === '/api/icount/config' && method === 'POST') {
+      const body = await request.json();
+      const { companyCode, userId, password, zone } = body;
+      if (!companyCode || !userId || !password) {
+        return err('companyCode, userId, password 가 필요합니다.');
+      }
+      await kvPut(kv, 'icount_config', { companyCode, userId, password, zone: zone || '1', updatedAt: new Date().toISOString() });
+      return json({ ok: true });
+    }
+
     // ── 데이터 초기화 (관리자 전용) ──
     if (path === '/api/seed' && method === 'POST') {
       const auth = request.headers.get('Authorization');

@@ -133,8 +133,13 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   void _loadHistory() {
-    // 저장된 레시피를 히스토리로 로드 (최근 20개) - 로그인한 경우 본인 기록만
-    final String? workerFilter = _isWorkerLoggedIn ? _loggedInWorker : null;
+    // 로그인하지 않은 경우 히스토리 숨김
+    if (!_isWorkerLoggedIn) {
+      setState(() { _history.clear(); });
+      return;
+    }
+    // 로그인한 경우 본인 기록만 표시
+    final String? workerFilter = _loggedInWorker.isNotEmpty ? _loggedInWorker : null;
     final recipes = DataService.getRecipes(workerName: workerFilter);
     final loaded = recipes.take(20).map((r) {
       final ingLabel = r.items.map((it) => it.ingredientName).join('+');
@@ -357,7 +362,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
       packagingWeight: actualWeightG,
       packagingType: _packagingType,
       calculatedPrice: result.unitPricePerPack,
-      workerName: _workerCtrl.text.trim(),
+      workerName: _loggedInWorker,
       weightCategory: _weightCat.name,
       bulkMoqKg: bulkMoqKg,
     );
@@ -371,7 +376,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
       detail: detail ?? '',
       weightCategory: _weightCat.name,
       time: DateTime.now(),
-      workerName: _workerCtrl.text.trim(),
+      workerName: _loggedInWorker,
       isMixed: _isMixed,
       ingredientsLabel: ingLabel,
       weightG: actualWeightG,
@@ -599,7 +604,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
                   GestureDetector(
                     onTap: () {
                       Navigator.pop(dialogCtx);
-                      context.push('/admin/login');
+                      context.push('/register');
                     },
                     child: const Text('가입 신청하기 →', style: TextStyle(fontSize: 11, color: AppTheme.primary, fontWeight: FontWeight.w600)),
                   ),
