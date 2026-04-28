@@ -467,25 +467,37 @@ export default {
       }
     }
 
-    // 견적서 저장 (/api/icount/estimate) - SaveSaleEstimate 또는 SaveSale
+    // 견적서 저장 (/api/icount/estimate)
     if (path === '/api/icount/estimate' && method === 'POST') {
       const body = await request.json();
-      const { sessionId, zone, estimateItems } = body;
+      const { sessionId, estimateItems } = body;
       if (!sessionId || !estimateItems) {
         return err('sessionId 와 estimateItems 가 필요합니다.');
       }
-      const z = zone || '1';
+      // zone은 SESSION_ID에서 자동 감지 (BC- prefix 등)
+      // SESSION_ID 형식: "hex:BC-ETP_xxx" → zone 추출
+      let z = 'BC'; // 기본값
+      try {
+        const parts = sessionId.split(':');
+        if (parts.length > 1) {
+          const zonePart = parts[1].split('-')[0];
+          z = zonePart;
+        }
+      } catch (_) {}
+
       const today = new Date();
       const dateStr = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
 
-      // 이카운트 판매견적 API
+      // 이카운트 판매견적 API 본문
       const icountBody = {
         SaleList: estimateItems.map((item, idx) => ({
           Line: String(idx),
           BulkDatas: {
             IO_DATE: item.date || dateStr,
-            CUST_DES: item.customerName || '',
             CUST: item.customerCode || '',
+            CUST_DES: item.customerName || '',
+            WH_CD: item.whCode || '',
+            EMP_CD: item.empCode || '',
             PROD_CD: item.productCode || '',
             PROD_DES: item.productName || '',
             QTY: String(item.qty || 1),
@@ -496,12 +508,13 @@ export default {
         })),
       };
 
-      // 운영서버(oapi)로 견적서/판매 API 시도
+      // 운영서버(oapi)로 견적서 API 시도 → 실패 시 판매 API fallback
       const endpoints = [
         `https://oapi${z}.ecount.com/OAPI/V2/SaleEstimate/SaveSaleEstimate?SESSION_ID=${sessionId}`,
         `https://oapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`,
       ];
 
+      let lastError = '';
       for (const endpoint of endpoints) {
         try {
           const res = await fetch(endpoint, {
@@ -509,34 +522,44 @@ export default {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(icountBody),
           });
-          const data = await res.json();
-          if (data?.Status === '200') {
+          const resText = await res.text();
+          let data;
+          try { data = JSON.parse(resText); } catch(_) { lastError = resText.substring(0,200); continue; }
+          if (String(data?.Status) === '200') {
             return json({ ok: true, endpoint, data });
           }
-        } catch (_) {}
+          lastError = data?.Errors?.[0]?.Message || data?.Error?.Message || JSON.stringify(data);
+        } catch (e) { lastError = e.message; }
       }
-      return err('이카운트 견적서 전송 실패. 품목코드 또는 창고코드를 확인하세요.', 400);
+      return err(`이카운트 전송 실패: ${lastError}`, 400);
     }
 
-    // 이카운트 설정 저장/조회 (KV 저장) - apiCertKey 기반
+    // 이카운트 설정 저장/조회 (KV 저장)
     if (path === '/api/icount/config' && method === 'GET') {
       const cfg = await kvGet(kv, 'icount_config', null);
-      if (cfg) return json({ ...cfg, apiCertKey: cfg.apiCertKey ? '***saved***' : '', password: cfg.apiCertKey ? '***saved***' : '' });
+      if (cfg) return json({ ...cfg, apiCertKey: cfg.apiCertKey ? '***saved***' : '' });
       return json(null);
     }
 
     if (path === '/api/icount/config' && method === 'POST') {
       const body = await request.json();
-      // apiCertKey 또는 password 필드 모두 수용
       const companyCode = body.companyCode;
       const userId = body.userId;
-      const apiCertKey = body.apiCertKey || body.password;
+      const newKey = body.apiCertKey || body.password || '';
       const zone = body.zone;
-      if (!companyCode || !userId || !apiCertKey) {
-        return err('companyCode, userId, apiCertKey 가 필요합니다.');
+      if (!companyCode || !userId) {
+        return err('companyCode, userId 가 필요합니다.');
       }
+      // 기존 설정 로드 (키는 변경 시에만 업데이트)
+      const existing = await kvGet(kv, 'icount_config', {});
+      const apiCertKey = (newKey && newKey !== '***saved***') ? newKey : (existing?.apiCertKey || '');
+      if (!apiCertKey) return err('API 인증키가 없습니다. 처음 설정 시에는 API 인증키를 입력해주세요.');
       await kvPut(kv, 'icount_config', {
-        companyCode, userId, apiCertKey, zone: zone || '1',
+        companyCode, userId, apiCertKey,
+        zone: zone || existing?.zone || 'auto',
+        defaultWh: body.defaultWh || existing?.defaultWh || '',
+        defaultProd: body.defaultProd || existing?.defaultProd || '',
+        defaultEmp: body.defaultEmp || existing?.defaultEmp || '',
         updatedAt: new Date().toISOString(),
       });
       return json({ ok: true });

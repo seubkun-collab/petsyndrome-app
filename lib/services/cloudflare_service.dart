@@ -582,6 +582,9 @@ class CloudflareService {
     required String userId,
     required String apiCertKey,
     String zone = 'auto',
+    String defaultWh = '',
+    String defaultProd = '',
+    String defaultEmp = '',
   }) async {
     try {
       final res = await http.post(
@@ -592,6 +595,9 @@ class CloudflareService {
           'userId': userId,
           'apiCertKey': apiCertKey,
           'zone': zone,
+          'defaultWh': defaultWh,
+          'defaultProd': defaultProd,
+          'defaultEmp': defaultEmp,
         }),
       ).timeout(_timeout);
       return res.statusCode == 200;

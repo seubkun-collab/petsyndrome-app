@@ -6,8 +6,10 @@ import '../../services/cloudflare_service.dart';
 import '../../utils/theme.dart';
 import '../../utils/formatter.dart';
 
-/// 이카운트 견적서 작성 화면
-/// 고객 견적 이력에서 항목을 선택해 이카운트 ERP로 자동 전송합니다.
+/// 이카운트 견적서 화면
+/// 탭1: 견적 작성 (견적이력 선택 → 클립보드 복사)
+/// 탭2: 이카운트 전송 (품목코드/거래처코드 매핑 후 자동 전송)
+/// 탭3: 이카운트 설정 (API 인증키, 창고코드, 기본 품목코드 등)
 class ICountEstimateScreen extends StatefulWidget {
   const ICountEstimateScreen({super.key});
   @override
@@ -18,33 +20,45 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     with SingleTickerProviderStateMixin {
   late final TabController _tabCtrl;
 
-  // 항목 선택
+  // ── 공통: 견적 선택 ──
   final Set<String> _selected = {};
   String _search = '';
 
-  // 견적서 헤더
+  // ── 탭1: 견적서 작성 ──
   final _customerNameCtrl = TextEditingController();
   final _customerContactCtrl = TextEditingController();
   final _noteCtrl = TextEditingController();
   DateTime _estimateDate = DateTime.now();
   int _validDays = 30;
 
-  // 이카운트 설정
+  // ── 탭2: 이카운트 전송 ──
+  // 선택된 각 레시피에 대한 품목코드/거래처코드 매핑
+  final Map<String, TextEditingController> _prodCodeCtrls = {};  // recipeId → 품목코드
+  final _custCodeCtrl = TextEditingController();   // 거래처코드
+  final _custNameCtrl = TextEditingController();   // 거래처명(이카운트 CUST_DES)
+  final _whCodeCtrl = TextEditingController();     // 창고코드
+  final _empCodeCtrl = TextEditingController();    // 담당자코드
+  final _sendNoteCtrl = TextEditingController();   // 비고
+  bool _sendLoading = false;
+  String? _sendResult;
+  bool _sendSuccess = false;
+  String? _sessionId;
+
+  // ── 탭3: 이카운트 설정 ──
   final _companyCodeCtrl = TextEditingController();
   final _userIdCtrl = TextEditingController();
   final _apiKeyCtrl = TextEditingController();
+  final _defaultWhCtrl = TextEditingController();   // 기본 창고코드
+  final _defaultProdCtrl = TextEditingController(); // 기본 품목코드
+  final _defaultEmpCtrl = TextEditingController();  // 기본 담당자코드
   bool _obscureKey = true;
   bool _configLoading = false;
-  bool _sendLoading = false;
-  String? _sessionId;
   String? _configStatus;
-  String? _sendResult;
-  bool _sendSuccess = false;
 
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 2, vsync: this);
+    _tabCtrl = TabController(length: 3, vsync: this);
     _loadICountConfig();
   }
 
@@ -54,23 +68,39 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     _customerNameCtrl.dispose();
     _customerContactCtrl.dispose();
     _noteCtrl.dispose();
+    _prodCodeCtrls.forEach((_, c) => c.dispose());
+    _custCodeCtrl.dispose();
+    _custNameCtrl.dispose();
+    _whCodeCtrl.dispose();
+    _empCodeCtrl.dispose();
+    _sendNoteCtrl.dispose();
     _companyCodeCtrl.dispose();
     _userIdCtrl.dispose();
     _apiKeyCtrl.dispose();
+    _defaultWhCtrl.dispose();
+    _defaultProdCtrl.dispose();
+    _defaultEmpCtrl.dispose();
     super.dispose();
   }
 
+  // ── 설정 로드 ──
   Future<void> _loadICountConfig() async {
     final cfg = await CloudflareService.icountGetConfig();
     if (cfg != null && mounted) {
       setState(() {
         _companyCodeCtrl.text = cfg['companyCode'] ?? '';
         _userIdCtrl.text = cfg['userId'] ?? '';
-        // API 인증키는 서버에서 마스킹으로 오므로 빈칸 유지 (사용자가 매번 입력)
+        _defaultWhCtrl.text = cfg['defaultWh'] ?? '';
+        _defaultProdCtrl.text = cfg['defaultProd'] ?? '';
+        _defaultEmpCtrl.text = cfg['defaultEmp'] ?? '';
       });
+      // 전송 탭 필드에도 기본값 채우기
+      if (_whCodeCtrl.text.isEmpty) _whCodeCtrl.text = cfg['defaultWh'] ?? '';
+      if (_empCodeCtrl.text.isEmpty) _empCodeCtrl.text = cfg['defaultEmp'] ?? '';
     }
   }
 
+  // ── 레시피 목록 ──
   List<Recipe> get _recipes {
     var list = DataService.getRecipes();
     if (_search.isNotEmpty) {
@@ -89,25 +119,67 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
   double get _totalPrice =>
       _selectedRecipes.fold(0.0, (sum, r) => sum + r.calculatedPrice);
 
-  void _toggleSelect(String id) =>
-      setState(() => _selected.contains(id) ? _selected.remove(id) : _selected.add(id));
+  void _toggleSelect(String id) {
+    setState(() {
+      if (_selected.contains(id)) {
+        _selected.remove(id);
+        _prodCodeCtrls.remove(id)?.dispose();
+      } else {
+        _selected.add(id);
+        // 품목코드 컨트롤러 초기화 (기본 품목코드 채우기)
+        _prodCodeCtrls[id] = TextEditingController(text: _defaultProdCtrl.text);
+      }
+    });
+  }
 
   void _selectAll() {
     final all = _recipes.map((r) => r.id).toSet();
-    setState(() => _selected.length == _recipes.length ? _selected.clear() : _selected.addAll(all));
+    setState(() {
+      if (_selected.length == _recipes.length) {
+        _prodCodeCtrls.forEach((_, c) => c.dispose());
+        _prodCodeCtrls.clear();
+        _selected.clear();
+      } else {
+        for (final r in _recipes) {
+          if (!_selected.contains(r.id)) {
+            _prodCodeCtrls[r.id] = TextEditingController(text: _defaultProdCtrl.text);
+          }
+        }
+        _selected.addAll(all);
+      }
+    });
   }
 
+  String _packLabel(Recipe r) {
+    switch (r.packagingType) {
+      case 'container': return '용기 ${r.packagingWeight.toStringAsFixed(0)}g';
+      case 'vinyl': return '비닐 ${r.packagingWeight.toStringAsFixed(0)}g';
+      case 'bulk': return '벌크 ${r.bulkMoqKg.toStringAsFixed(0)}kg';
+      default: return '${r.packagingWeight.toStringAsFixed(0)}g';
+    }
+  }
+
+  String _formatDate(DateTime d) => '${d.year}년 ${d.month}월 ${d.day}일';
+  String _formatDateCompact(DateTime d) =>
+      '${d.year}${d.month.toString().padLeft(2,'0')}${d.day.toString().padLeft(2,'0')}';
+
+  // ── 설정 저장 ──
   Future<void> _saveConfig() async {
     final code = _companyCodeCtrl.text.trim();
     final user = _userIdCtrl.text.trim();
     final key = _apiKeyCtrl.text.trim();
-    if (code.isEmpty || user.isEmpty || key.isEmpty) {
-      setState(() => _configStatus = '회사코드, 아이디, API 인증키를 모두 입력하세요.');
+    if (code.isEmpty || user.isEmpty) {
+      setState(() => _configStatus = '회사코드와 아이디를 입력하세요.');
       return;
     }
     setState(() { _configLoading = true; _configStatus = null; });
     final ok = await CloudflareService.icountSaveConfig(
-      companyCode: code, userId: user, apiCertKey: key,
+      companyCode: code,
+      userId: user,
+      apiCertKey: key,
+      defaultWh: _defaultWhCtrl.text.trim(),
+      defaultProd: _defaultProdCtrl.text.trim(),
+      defaultEmp: _defaultEmpCtrl.text.trim(),
     );
     if (mounted) setState(() {
       _configLoading = false;
@@ -115,10 +187,11 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     });
   }
 
+  // ── 연결 테스트 ──
   Future<void> _testConnection() async {
     final code = _companyCodeCtrl.text.trim();
     final user = _userIdCtrl.text.trim();
-    final key = _apiKeyCtrl.text.trim(); // 비어있으면 서버가 저장된 키 사용
+    final key = _apiKeyCtrl.text.trim();
     if (code.isEmpty || user.isEmpty) {
       setState(() => _configStatus = '회사코드와 아이디를 입력하세요.');
       return;
@@ -134,10 +207,10 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
         setState(() {
           _sessionId = sessionId;
           _configLoading = false;
-          _configStatus = '✅ 연결 성공! (Zone: $zone) 세션 발급 완료. 이제 견적 전송이 가능합니다.';
+          _configStatus = '✅ 연결 성공! (Zone: $zone) 이제 이카운트 전송이 가능합니다.';
         });
       } else {
-        final errMsg = res['error'] as String? ?? (res['raw'] != null ? res['raw'].toString() : '알 수 없는 오류');
+        final errMsg = res['error'] as String? ?? '알 수 없는 오류';
         setState(() {
           _configLoading = false;
           _configStatus = '❌ 연결 실패: $errMsg';
@@ -146,6 +219,7 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     }
   }
 
+  // ── 이카운트 전송 ──
   Future<void> _sendToICount() async {
     if (_selectedRecipes.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -153,35 +227,58 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
       );
       return;
     }
-
-    // 세션이 없으면 먼저 로그인
-    if (_sessionId == null) {
-      await _testConnection();
-      if (_sessionId == null) {
+    final wh = _whCodeCtrl.text.trim();
+    if (wh.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('창고코드를 입력하세요. (설정 탭에서 기본값 저장 가능)'), behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
+    // 품목코드 확인
+    for (final r in _selectedRecipes) {
+      final prodCode = _prodCodeCtrls[r.id]?.text.trim() ?? '';
+      if (prodCode.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('이카운트 연결에 실패했습니다. 설정을 확인하세요.'), behavior: SnackBarBehavior.floating),
+          SnackBar(content: Text('"${r.name}" 의 이카운트 품목코드를 입력하세요.'), behavior: SnackBarBehavior.floating),
         );
         return;
       }
     }
 
+    // 세션 없으면 자동 로그인
+    if (_sessionId == null) {
+      setState(() { _sendLoading = true; _sendResult = '이카운트 로그인 중...'; });
+      final cfg = await CloudflareService.icountGetConfig();
+      final res = await CloudflareService.icountGetSession(
+        companyCode: cfg?['companyCode'] ?? _companyCodeCtrl.text.trim(),
+        userId: cfg?['userId'] ?? _userIdCtrl.text.trim(),
+        apiCertKey: '',
+      );
+      if (res['ok'] != true) {
+        setState(() { _sendLoading = false; _sendResult = '❌ 이카운트 로그인 실패: ${res['error']}\n설정 탭에서 연결을 확인하세요.'; _sendSuccess = false; });
+        return;
+      }
+      _sessionId = res['sessionId'] as String?;
+    }
+
     setState(() { _sendLoading = true; _sendResult = null; _sendSuccess = false; });
 
-    final today = DateTime.now();
-    final dateStr = '${today.year}${today.month.toString().padLeft(2,'0')}${today.day.toString().padLeft(2,'0')}';
-    // zone은 세션 로그인 시 자동으로 결정됨 (worker.js에서 처리)
-
+    final dateStr = _formatDateCompact(_estimateDate);
     final items = _selectedRecipes.map((r) {
       final ingNames = r.items.map((it) => it.ingredientName).join('+');
+      final prodCode = _prodCodeCtrls[r.id]?.text.trim() ?? '';
+      final prodName = '$ingNames ${_packLabel(r)}';
       return {
         'date': dateStr,
-        'customerName': _customerNameCtrl.text.trim(),
-        'customerCode': '',
-        'productCode': r.id.substring(0, 8),
-        'productName': '$ingNames ${_packLabel(r)}',
+        'customerCode': _custCodeCtrl.text.trim(),
+        'customerName': _custNameCtrl.text.trim(),
+        'whCode': wh,
+        'empCode': _empCodeCtrl.text.trim(),
+        'productCode': prodCode,
+        'productName': prodName,
         'qty': 1,
         'unitPrice': r.calculatedPrice,
-        'note': _noteCtrl.text.trim(),
+        'note': _sendNoteCtrl.text.trim(),
       };
     }).toList();
 
@@ -192,24 +289,30 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
 
     if (mounted) {
       final ok = res['ok'] == true;
+      if (!ok) _sessionId = null; // 세션 만료 처리
       final data = res['data'] as Map<String, dynamic>?;
-      final successCnt = (data?['Data'] as Map<String, dynamic>?)?['SuccessCnt'];
-      final failCnt = (data?['Data'] as Map<String, dynamic>?)?['FailCnt'];
+      final successCnt = (data?['Data'] as Map<String, dynamic>?)?['SuccessCnt'] ?? 0;
+      final failCnt = (data?['Data'] as Map<String, dynamic>?)?['FailCnt'] ?? 0;
+      final slipNos = (data?['Data'] as Map<String, dynamic>?)?['SlipNos'] as List? ?? [];
 
       setState(() {
         _sendLoading = false;
         _sendSuccess = ok;
         if (ok) {
-          _sendResult = '✅ 이카운트 전송 성공!\n성공: $successCnt건 / 실패: $failCnt건';
+          _sendResult = '✅ 이카운트 전송 성공!\n성공: $successCnt건 / 실패: $failCnt건'
+              + (slipNos.isNotEmpty ? '\n전표번호: ${slipNos.join(', ')}' : '');
         } else {
-          // 세션 만료 시 재시도
-          _sessionId = null;
-          _sendResult = '❌ 전송 실패: ${res['error'] ?? '알 수 없는 오류'}\n세션이 만료되었을 수 있습니다. 다시 시도하세요.';
+          _sendResult = '❌ 전송 실패: ${res['error'] ?? '알 수 없는 오류'}\n\n'
+              '확인사항:\n'
+              '• 품목코드가 이카운트에 등록되어 있는지 확인\n'
+              '• 창고코드가 이카운트에 등록되어 있는지 확인\n'
+              '• 거래처코드가 있다면 이카운트에 등록된 코드인지 확인';
         }
       });
     }
   }
 
+  // ── 클립보드 복사용 견적서 텍스트 ──
   String _buildEstimateText() {
     final buf = StringBuffer();
     buf.writeln('═══════════════════════════════════');
@@ -236,559 +339,655 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
       buf.writeln('비고: ${_noteCtrl.text.trim()}');
     }
     buf.writeln('═══════════════════════════════════');
-    buf.writeln('※ 본 견적은 예상 단가입니다. 확정 견적은 별도 문의 바랍니다.');
-    buf.writeln('공급자: 펫신드룸');
     return buf.toString();
   }
 
-  String _packLabel(Recipe r) {
-    switch (r.packagingType) {
-      case 'container': return '용기포장 (${r.packagingWeight.toStringAsFixed(0)}g)';
-      case 'vinyl': return '비닐포장 (${r.packagingWeight.toStringAsFixed(0)}g)';
-      case 'bulk': return '벌크 ${r.bulkMoqKg.toStringAsFixed(0)}kg';
-      default: return '포장 (${r.packagingWeight.toStringAsFixed(0)}g)';
-    }
-  }
-
-  String _formatDate(DateTime d) => '${d.year}년 ${d.month}월 ${d.day}일';
-
-  void _copyToClipboard() {
-    if (_selectedRecipes.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('견적 항목을 선택해주세요.'), behavior: SnackBarBehavior.floating),
-      );
-      return;
-    }
-    Clipboard.setData(ClipboardData(text: _buildEstimateText()));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('견적서가 클립보드에 복사되었습니다.'),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: AppTheme.primary,
-      ),
-    );
-  }
-
+  // ════════════════════════════════════════
+  // BUILD
+  // ════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppTheme.background,
-      body: Column(
+      appBar: AppBar(
+        title: const Text('이카운트 견적서'),
+        bottom: TabBar(
+          controller: _tabCtrl,
+          tabs: const [
+            Tab(icon: Icon(Icons.description_outlined, size: 18), text: '견적 작성'),
+            Tab(icon: Icon(Icons.send_outlined, size: 18), text: '이카운트 전송'),
+            Tab(icon: Icon(Icons.settings_outlined, size: 18), text: '설정'),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabCtrl,
         children: [
-          // 헤더
-          Container(
-            color: AppTheme.surface,
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(children: [
-                  Container(
-                    width: 36, height: 36,
-                    decoration: BoxDecoration(color: AppTheme.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8)),
-                    child: const Icon(Icons.receipt_long_outlined, color: AppTheme.primary, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
-                    Text('이카운트 견적서', style: AppText.heading3),
-                    Text('견적 이력 선택 → 이카운트 ERP 자동 전송', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-                  ]),
-                  const Spacer(),
-                  // 세션 상태 표시
-                  if (_sessionId != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(color: AppTheme.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20)),
-                      child: Row(children: const [
-                        Icon(Icons.link, size: 12, color: AppTheme.primary),
-                        SizedBox(width: 4),
-                        Text('이카운트 연결됨', style: TextStyle(fontSize: 11, color: AppTheme.primary, fontWeight: FontWeight.w600)),
-                      ]),
-                    ),
-                ]),
-                const SizedBox(height: 12),
-                TabBar(
-                  controller: _tabCtrl,
-                  labelColor: AppTheme.primary,
-                  unselectedLabelColor: AppTheme.textSecondary,
-                  indicatorColor: AppTheme.primary,
-                  labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                  tabs: const [
-                    Tab(text: '견적 선택 & 전송'),
-                    Tab(text: '이카운트 설정'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          Expanded(
-            child: TabBarView(
-              controller: _tabCtrl,
-              children: [
-                _buildEstimateTab(),
-                _buildConfigTab(),
-              ],
-            ),
-          ),
+          _buildEstimateTab(),
+          _buildSendTab(),
+          _buildSettingsTab(),
         ],
       ),
     );
   }
 
+  // ══════════════════════════════════════
+  // 탭1: 견적 작성 (클립보드 복사)
+  // ══════════════════════════════════════
   Widget _buildEstimateTab() {
-    final recipes = _recipes;
-    final allSelected = recipes.isNotEmpty && _selected.length == recipes.length;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 왼쪽: 견적 목록
-        Expanded(
-          flex: 3,
-          child: Column(
+        // 좌측: 레시피 선택
+        SizedBox(
+          width: 320,
+          child: _buildRecipeList(),
+        ),
+        const VerticalDivider(width: 1),
+        // 우측: 견적서 작성
+        Expanded(child: _buildEstimateForm()),
+      ],
+    );
+  }
+
+  Widget _buildRecipeList() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            decoration: const InputDecoration(
+              hintText: '레시피 검색...',
+              prefixIcon: Icon(Icons.search, size: 18),
+              isDense: true,
+            ),
+            onChanged: (v) => setState(() => _search = v),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
             children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppTheme.border))),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        decoration: const InputDecoration(
-                          hintText: '원료명, 작업자명 검색...',
-                          prefixIcon: Icon(Icons.search, size: 16),
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        ),
-                        onChanged: (v) => setState(() => _search = v),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    TextButton.icon(
-                      onPressed: _selectAll,
-                      icon: Icon(allSelected ? Icons.deselect : Icons.select_all, size: 16),
-                      label: Text(allSelected ? '선택해제' : '전체선택', style: const TextStyle(fontSize: 12)),
-                      style: TextButton.styleFrom(foregroundColor: AppTheme.primary),
-                    ),
-                  ],
-                ),
-              ),
-              if (_selected.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  color: AppTheme.primary.withValues(alpha: 0.06),
-                  child: Row(children: [
-                    const Icon(Icons.check_circle, color: AppTheme.primary, size: 15),
-                    const SizedBox(width: 6),
-                    Text('${_selected.length}개 선택됨 · 합계 ${Fmt.won(_totalPrice)}',
-                        style: const TextStyle(fontSize: 12, color: AppTheme.primary, fontWeight: FontWeight.w500)),
-                  ]),
-                ),
-              Expanded(
-                child: recipes.isEmpty
-                    ? const Center(child: Text('견적 이력이 없습니다.', style: TextStyle(color: AppTheme.textSecondary)))
-                    : ListView.separated(
-                        padding: const EdgeInsets.all(8),
-                        itemCount: recipes.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 4),
-                        itemBuilder: (_, i) {
-                          final r = recipes[i];
-                          final sel = _selected.contains(r.id);
-                          final ingNames = r.items.map((it) => it.ingredientName).join(' + ');
-                          return InkWell(
-                            onTap: () => _toggleSelect(r.id),
-                            borderRadius: BorderRadius.circular(8),
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: sel ? AppTheme.primary.withValues(alpha: 0.06) : AppTheme.surface,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: sel ? AppTheme.primary.withValues(alpha: 0.3) : AppTheme.border),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(sel ? Icons.check_box : Icons.check_box_outline_blank,
-                                      size: 18, color: sel ? AppTheme.primary : AppTheme.textSecondary),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(ingNames, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          '${_packLabel(r)} · ${r.workerName.isNotEmpty ? r.workerName : "미기록"} · ${Fmt.date(r.createdAt)}',
-                                          style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(Fmt.won(r.calculatedPrice),
-                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.primary)),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+              Text('${_selected.length}개 선택', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              TextButton(
+                onPressed: _selectAll,
+                child: Text(_selected.length == _recipes.length ? '전체해제' : '전체선택', style: const TextStyle(fontSize: 12)),
               ),
             ],
           ),
         ),
-
-        // 오른쪽: 액션 패널
-        Container(
-          width: 280,
-          decoration: const BoxDecoration(
-            border: Border(left: BorderSide(color: AppTheme.border)),
-            color: AppTheme.surface,
-          ),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text('견적서 정보', style: AppText.heading3),
-                const SizedBox(height: 14),
-                TextField(
-                  controller: _customerNameCtrl,
-                  decoration: const InputDecoration(
-                    labelText: '고객명',
-                    prefixIcon: Icon(Icons.person_outline, size: 16),
-                    isDense: true,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _customerContactCtrl,
-                  decoration: const InputDecoration(
-                    labelText: '연락처 (선택)',
-                    prefixIcon: Icon(Icons.phone_outlined, size: 16),
-                    isDense: true,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                GestureDetector(
-                  onTap: () async {
-                    final picked = await showDatePicker(
-                      context: context,
-                      initialDate: _estimateDate,
-                      firstDate: DateTime(2020),
-                      lastDate: DateTime(2030),
-                    );
-                    if (picked != null) setState(() => _estimateDate = picked);
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: AppTheme.border),
-                      borderRadius: BorderRadius.circular(8),
-                      color: const Color(0xFFF9FAFB),
-                    ),
-                    child: Row(children: [
-                      const Icon(Icons.calendar_today_outlined, size: 15, color: AppTheme.textSecondary),
-                      const SizedBox(width: 8),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        const Text('견적일', style: TextStyle(fontSize: 10, color: AppTheme.textSecondary)),
-                        Text(_formatDate(_estimateDate), style: const TextStyle(fontSize: 13)),
-                      ])),
-                      const Icon(Icons.edit_outlined, size: 13, color: AppTheme.textSecondary),
-                    ]),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(children: [
-                  const Text('유효기간', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-                  const Spacer(),
-                  DropdownButton<int>(
-                    value: _validDays,
-                    isDense: true,
-                    items: const [
-                      DropdownMenuItem(value: 7, child: Text('7일')),
-                      DropdownMenuItem(value: 14, child: Text('14일')),
-                      DropdownMenuItem(value: 30, child: Text('30일')),
-                      DropdownMenuItem(value: 60, child: Text('60일')),
-                      DropdownMenuItem(value: 90, child: Text('90일')),
-                    ],
-                    onChanged: (v) => setState(() => _validDays = v ?? 30),
-                  ),
-                ]),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _noteCtrl,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText: '비고',
-                    prefixIcon: Icon(Icons.notes_outlined, size: 16),
-                    alignLabelWithHint: true,
-                    isDense: true,
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-                const Divider(),
-                const SizedBox(height: 10),
-
-                if (_selectedRecipes.isNotEmpty) ...[
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primary.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppTheme.primary.withValues(alpha: 0.2)),
-                    ),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('${_selectedRecipes.length}개 항목 선택',
-                          style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
-                      const SizedBox(height: 4),
-                      Text(Fmt.won(_totalPrice),
-                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.primary)),
-                    ]),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-
-                // 이카운트 전송 버튼
-                ElevatedButton.icon(
-                  onPressed: (_sendLoading || _selectedRecipes.isEmpty) ? null : _sendToICount,
-                  icon: _sendLoading
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.send_outlined, size: 16),
-                  label: Text(_sendLoading ? '전송 중...' : '이카운트로 전송'),
-                  style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
-                ),
-
-                if (_sendResult != null) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: _sendSuccess
-                          ? AppTheme.primary.withValues(alpha: 0.08)
-                          : AppTheme.danger.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(_sendResult!,
-                        style: TextStyle(fontSize: 12,
-                            color: _sendSuccess ? AppTheme.primary : AppTheme.danger)),
-                  ),
-                ],
-
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _selectedRecipes.isEmpty ? null : _copyToClipboard,
-                  icon: const Icon(Icons.copy, size: 16),
-                  label: const Text('클립보드 복사'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                    foregroundColor: AppTheme.primary,
-                    side: const BorderSide(color: AppTheme.primary),
-                  ),
-                ),
-
-                const SizedBox(height: 6),
-                // 연결 안 된 경우 설정 탭으로 유도
-                if (_sessionId == null)
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppTheme.warning.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppTheme.warning.withValues(alpha: 0.3)),
-                    ),
-                    child: Row(children: [
-                      const Icon(Icons.warning_amber_outlined, color: AppTheme.warning, size: 14),
-                      const SizedBox(width: 6),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        const Text('이카운트 미연결', style: TextStyle(fontSize: 12, color: AppTheme.warning, fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 2),
-                        GestureDetector(
-                          onTap: () => _tabCtrl.animateTo(1),
-                          child: const Text('설정 탭에서 API 정보를 입력하세요 →',
-                              style: TextStyle(fontSize: 11, color: AppTheme.info, decoration: TextDecoration.underline)),
+        Expanded(
+          child: _recipes.isEmpty
+              ? const Center(child: Text('견적 이력이 없습니다.', style: TextStyle(color: AppTheme.textSecondary)))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  itemCount: _recipes.length,
+                  itemBuilder: (_, i) {
+                    final r = _recipes[i];
+                    final sel = _selected.contains(r.id);
+                    final ingNames = r.items.map((it) => it.ingredientName).join(' + ');
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 3),
+                      color: sel ? AppTheme.primary.withValues(alpha: 0.08) : AppTheme.surface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        side: BorderSide(color: sel ? AppTheme.primary : AppTheme.border),
+                      ),
+                      child: InkWell(
+                        onTap: () => _toggleSelect(r.id),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          child: Row(
+                            children: [
+                              Checkbox(
+                                value: sel,
+                                onChanged: (_) => _toggleSelect(r.id),
+                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(ingNames, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                    const SizedBox(height: 2),
+                                    Text('${_packLabel(r)}  •  ${Fmt.won(r.calculatedPrice)}원', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                                    if (r.workerName.isNotEmpty)
+                                      Text('고객: ${r.workerName}', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ])),
-                    ]),
-                  ),
-              ],
-            ),
-          ),
+                      ),
+                    );
+                  },
+                ),
         ),
       ],
     );
   }
 
-  Widget _buildConfigTab() {
+  Widget _buildEstimateForm() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // 안내 배너
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: AppTheme.info.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppTheme.info.withValues(alpha: 0.2)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Row(children: [
-                    Icon(Icons.info_outline, color: AppTheme.info, size: 16),
-                    SizedBox(width: 6),
-                    Text('이카운트 ERP API 연동 방법', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.info)),
-                  ]),
-                  SizedBox(height: 8),
-                  Text(
-                    '1. 이카운트 로그인 → 정보관리 → 오픈 API\n'
-                    '2. API 인증키 발급 (테스트키 가능)\n'
-                    '3. 아래에 회사코드(6자리), 담당자 ID, API 인증키 입력\n'
-                    '4. [연결 테스트] 버튼으로 Zone 자동 감지 및 세션 확인 후 견적 전송',
-                    style: TextStyle(fontSize: 12, color: AppTheme.info, height: 1.6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 헤더 정보
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('견적서 정보', style: AppText.heading3),
+                const SizedBox(height: 14),
+                Row(children: [
+                  Expanded(child: TextField(controller: _customerNameCtrl, decoration: const InputDecoration(labelText: '고객명', prefixIcon: Icon(Icons.person_outline, size: 16), isDense: true))),
+                  const SizedBox(width: 10),
+                  Expanded(child: TextField(controller: _customerContactCtrl, decoration: const InputDecoration(labelText: '연락처', prefixIcon: Icon(Icons.phone_outlined, size: 16), isDense: true))),
+                ]),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: InkWell(
+                      onTap: () async {
+                        final d = await showDatePicker(context: context, initialDate: _estimateDate, firstDate: DateTime(2020), lastDate: DateTime(2030));
+                        if (d != null) setState(() => _estimateDate = d);
+                      },
+                      child: InputDecorator(
+                        decoration: const InputDecoration(labelText: '견적일', prefixIcon: Icon(Icons.calendar_today_outlined, size: 16), isDense: true),
+                        child: Text(_formatDate(_estimateDate), style: const TextStyle(fontSize: 13)),
+                      ),
+                    ),
                   ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: DropdownButtonFormField<int>(
+                      value: _validDays,
+                      decoration: const InputDecoration(labelText: '유효기간', isDense: true),
+                      items: [7, 14, 30, 60, 90].map((d) => DropdownMenuItem(value: d, child: Text('$d일'))).toList(),
+                      onChanged: (v) => setState(() => _validDays = v!),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 10),
+                TextField(controller: _noteCtrl, decoration: const InputDecoration(labelText: '비고', prefixIcon: Icon(Icons.notes_outlined, size: 16), isDense: true), maxLines: 2),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // 선택된 항목 미리보기
+          if (_selectedRecipes.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(children: [
+                    const Text('견적 항목', style: AppText.heading3),
+                    const Spacer(),
+                    Text('합계: ${Fmt.won(_totalPrice)}원', style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.primary, fontSize: 14)),
+                  ]),
+                  const SizedBox(height: 10),
+                  ...List.generate(_selectedRecipes.length, (i) {
+                    final r = _selectedRecipes[i];
+                    final ingNames = r.items.map((it) => it.ingredientName).join(' + ');
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          Text('${i + 1}.', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(ingNames, style: const TextStyle(fontSize: 12))),
+                          Text(_packLabel(r), style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                          const SizedBox(width: 12),
+                          Text('${Fmt.won(r.calculatedPrice)}원', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          // 버튼들
+          Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _selectedRecipes.isEmpty ? null : () {
+                  showDialog(context: context, builder: (_) => AlertDialog(
+                    title: const Text('견적서 미리보기'),
+                    content: SingleChildScrollView(child: SelectableText(_buildEstimateText(), style: const TextStyle(fontFamily: 'monospace', fontSize: 12))),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context), child: const Text('닫기')),
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.copy, size: 16),
+                        label: const Text('복사'),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: _buildEstimateText()));
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('클립보드에 복사되었습니다.'), behavior: SnackBarBehavior.floating));
+                        },
+                      ),
+                    ],
+                  ));
+                },
+                icon: const Icon(Icons.preview_outlined, size: 16),
+                label: const Text('미리보기'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _selectedRecipes.isEmpty ? null : () {
+                  Clipboard.setData(ClipboardData(text: _buildEstimateText()));
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('견적서가 클립보드에 복사되었습니다.'), behavior: SnackBarBehavior.floating));
+                },
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('클립보드 복사'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _selectedRecipes.isEmpty ? null : () {
+                  _tabCtrl.animateTo(1);
+                },
+                icon: const Icon(Icons.send_outlined, size: 16),
+                label: const Text('이카운트 전송 →'),
+                style: ElevatedButton.styleFrom(backgroundColor: AppTheme.info),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════
+  // 탭2: 이카운트 전송
+  // ══════════════════════════════════════
+  Widget _buildSendTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 안내
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(color: AppTheme.info.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppTheme.info.withValues(alpha: 0.3))),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [Icon(Icons.info_outline, size: 16, color: AppTheme.info), const SizedBox(width: 6), Text('이카운트 전송 방법', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.info))]),
+                const SizedBox(height: 8),
+                const Text(
+                  '1. 견적 작성 탭에서 항목을 먼저 선택하세요.\n'
+                  '2. 이카운트에 등록된 품목코드·창고코드·거래처코드를 입력하세요.\n'
+                  '3. [이카운트 견적서 전송] 버튼을 클릭하세요.\n\n'
+                  '※ 품목코드/창고코드는 이카운트 ERP → 재고 → 품목/창고 메뉴에서 확인\n'
+                  '※ 거래처코드는 이카운트 ERP → 거래처 메뉴에서 확인 (없으면 빈칸 가능)',
+                  style: TextStyle(fontSize: 12, height: 1.6),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          if (_selectedRecipes.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(30),
+              decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+              child: Column(children: [
+                Icon(Icons.check_box_outline_blank, size: 48, color: AppTheme.border),
+                const SizedBox(height: 12),
+                const Text('견적 작성 탭에서 항목을 선택해주세요.', style: TextStyle(color: AppTheme.textSecondary)),
+                const SizedBox(height: 10),
+                OutlinedButton(onPressed: () => _tabCtrl.animateTo(0), child: const Text('← 견적 작성 탭으로')),
+              ]),
+            )
+          else ...[
+            // 공통 정보
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('거래처 및 전표 정보', style: AppText.heading3),
+                  const SizedBox(height: 14),
+                  Row(children: [
+                    Expanded(child: TextField(
+                      controller: _custCodeCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '거래처코드 (선택)',
+                        hintText: '이카운트 거래처코드',
+                        prefixIcon: Icon(Icons.business_outlined, size: 16),
+                        isDense: true,
+                      ),
+                    )),
+                    const SizedBox(width: 10),
+                    Expanded(child: TextField(
+                      controller: _custNameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '거래처명 (선택)',
+                        hintText: '표시용 이름',
+                        prefixIcon: Icon(Icons.person_outline, size: 16),
+                        isDense: true,
+                      ),
+                    )),
+                  ]),
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    Expanded(child: TextField(
+                      controller: _whCodeCtrl,
+                      decoration: InputDecoration(
+                        labelText: '창고코드 *',
+                        hintText: '예: 100',
+                        helperText: '이카운트에 등록된 창고코드',
+                        prefixIcon: const Icon(Icons.warehouse_outlined, size: 16),
+                        isDense: true,
+                        suffixIcon: _whCodeCtrl.text.isEmpty
+                          ? const Icon(Icons.warning_amber, size: 16, color: Colors.orange)
+                          : const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                      ),
+                    )),
+                    const SizedBox(width: 10),
+                    Expanded(child: TextField(
+                      controller: _empCodeCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '담당자코드 (선택)',
+                        hintText: '예: petsyndrome',
+                        prefixIcon: Icon(Icons.badge_outlined, size: 16),
+                        isDense: true,
+                      ),
+                    )),
+                  ]),
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    Expanded(
+                      child: InkWell(
+                        onTap: () async {
+                          final d = await showDatePicker(context: context, initialDate: _estimateDate, firstDate: DateTime(2020), lastDate: DateTime(2030));
+                          if (d != null) setState(() => _estimateDate = d);
+                        },
+                        child: InputDecorator(
+                          decoration: const InputDecoration(labelText: '전표일자', prefixIcon: Icon(Icons.calendar_today_outlined, size: 16), isDense: true),
+                          child: Text(_formatDate(_estimateDate), style: const TextStyle(fontSize: 13)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: TextField(
+                      controller: _sendNoteCtrl,
+                      decoration: const InputDecoration(labelText: '비고', prefixIcon: Icon(Icons.notes_outlined, size: 16), isDense: true),
+                    )),
+                  ]),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // 품목별 코드 매핑
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(children: [
+                    const Text('품목코드 매핑 *', style: AppText.heading3),
+                    const SizedBox(width: 8),
+                    Text('(이카운트에 등록된 품목코드 입력)', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                  ]),
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(color: AppTheme.warning.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8)),
+                    child: const Text(
+                      '이카운트 ERP → [재고] → [품목] 메뉴에서 품목코드를 확인하세요.\n'
+                      '품목이 없으면 이카운트에서 먼저 품목을 등록해야 합니다.',
+                      style: TextStyle(fontSize: 11, color: AppTheme.warning),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ...List.generate(_selectedRecipes.length, (i) {
+                    final r = _selectedRecipes[i];
+                    final ingNames = r.items.map((it) => it.ingredientName).join(' + ');
+                    _prodCodeCtrls.putIfAbsent(r.id, () => TextEditingController(text: _defaultProdCtrl.text));
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('${i+1}. $ingNames', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                Text('${_packLabel(r)}  •  ${Fmt.won(r.calculatedPrice)}원', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            flex: 2,
+                            child: TextField(
+                              controller: _prodCodeCtrls[r.id],
+                              decoration: InputDecoration(
+                                labelText: '품목코드 *',
+                                hintText: '예: PROD001',
+                                isDense: true,
+                                suffixIcon: (_prodCodeCtrls[r.id]?.text.isEmpty ?? true)
+                                  ? const Icon(Icons.warning_amber, size: 14, color: Colors.orange)
+                                  : const Icon(Icons.check_circle, size: 14, color: Colors.green),
+                              ),
+                              onChanged: (_) => setState(() {}),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),
             const SizedBox(height: 20),
 
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: AppTheme.surface,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppTheme.border),
+            // 전송 결과
+            if (_sendResult != null) ...[
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: _sendSuccess ? AppTheme.primary.withValues(alpha: 0.08) : AppTheme.danger.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: _sendSuccess ? AppTheme.primary.withValues(alpha: 0.3) : AppTheme.danger.withValues(alpha: 0.3)),
+                ),
+                child: Text(_sendResult!, style: TextStyle(fontSize: 12, color: _sendSuccess ? AppTheme.primary : AppTheme.danger, height: 1.6)),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('이카운트 ERP 계정 정보', style: AppText.heading3),
-                  const SizedBox(height: 16),
+              const SizedBox(height: 16),
+            ],
 
-                  Row(children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _companyCodeCtrl,
-                        decoration: const InputDecoration(
-                          labelText: '회사코드 (6자리)',
-                          prefixIcon: Icon(Icons.business_outlined, size: 16),
-                          isDense: true,
-                          hintText: '예: 123456',
-                        ),
-                      ),
-                    ),
-                  ]),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _userIdCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '담당자 ID',
-                      prefixIcon: Icon(Icons.person_outline, size: 16),
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _apiKeyCtrl,
-                    obscureText: _obscureKey,
-                    decoration: InputDecoration(
-                      labelText: 'API 인증키',
-                      prefixIcon: const Icon(Icons.vpn_key_outlined, size: 16),
-                      isDense: true,
-                      hintText: '저장된 키 사용 (변경 시에만 입력)',
-                      helperText: '비워두면 이전에 저장한 API 인증키를 자동 사용합니다',
-                      helperStyle: const TextStyle(fontSize: 11),
-                      suffixIcon: IconButton(
-                        icon: Icon(_obscureKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 16),
-                        onPressed: () => setState(() => _obscureKey = !_obscureKey),
-                      ),
-                    ),
-                  ),
-
-                  if (_configStatus != null) ...[
-                    const SizedBox(height: 12),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: _configStatus!.startsWith('✅')
-                            ? AppTheme.primary.withValues(alpha: 0.08)
-                            : _configStatus!.startsWith('⚠️')
-                                ? AppTheme.warning.withValues(alpha: 0.08)
-                                : AppTheme.danger.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(_configStatus!,
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: _configStatus!.startsWith('✅')
-                                  ? AppTheme.primary
-                                  : _configStatus!.startsWith('⚠️')
-                                      ? AppTheme.warning
-                                      : AppTheme.danger)),
-                    ),
-                  ],
-
-                  const SizedBox(height: 16),
-                  Row(children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _configLoading ? null : _testConnection,
-                        icon: _configLoading
-                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                            : const Icon(Icons.link, size: 16),
-                        label: const Text('연결 테스트'),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 11),
-                          foregroundColor: AppTheme.primary,
-                          side: const BorderSide(color: AppTheme.primary),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _configLoading ? null : _saveConfig,
-                        icon: const Icon(Icons.save_outlined, size: 16),
-                        label: const Text('설정 저장'),
-                        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 11)),
-                      ),
-                    ),
-                  ]),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 16),
-            // Zone 설명
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: AppTheme.background,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: AppTheme.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text('Zone 번호 확인 방법', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                  SizedBox(height: 6),
-                  Text(
-                    '이카운트 로그인 후 주소창 URL을 확인하세요.\n'
-                    'oapi1.ecount.com → Zone: 1\n'
-                    'oapi2.ecount.com → Zone: 2\n'
-                    '모르면 1로 시작해서 연결 테스트로 확인하세요.',
-                    style: TextStyle(fontSize: 11, color: AppTheme.textSecondary, height: 1.6),
-                  ),
-                ],
+            // 전송 버튼
+            SizedBox(
+              height: 48,
+              child: ElevatedButton.icon(
+                onPressed: _sendLoading ? null : _sendToICount,
+                icon: _sendLoading
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.send, size: 18),
+                label: Text(_sendLoading ? '전송 중...' : '이카운트 견적서 전송'),
+                style: ElevatedButton.styleFrom(backgroundColor: AppTheme.info),
               ),
             ),
           ],
-        ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════
+  // 탭3: 설정
+  // ══════════════════════════════════════
+  Widget _buildSettingsTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 안내
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(color: AppTheme.info.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppTheme.info.withValues(alpha: 0.3))),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [Icon(Icons.info_outline, size: 16, color: AppTheme.info), const SizedBox(width: 6), Text('이카운트 ERP API 연동 방법', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.info))]),
+                const SizedBox(height: 8),
+                const Text(
+                  '1. 이카운트 로그인 → 정보관리 → 오픈 API → API 인증키 발급\n'
+                  '2. 아래에 회사코드(6자리), 담당자 ID, API 인증키 입력 후 [저장]\n'
+                  '3. [연결 테스트]로 로그인 확인\n'
+                  '4. 기본 창고코드: 이카운트 [재고] → [창고] 메뉴에서 확인\n'
+                  '5. 기본 품목코드: 자주 쓰는 품목코드 입력 시 전송탭에서 자동 채워짐',
+                  style: TextStyle(fontSize: 12, height: 1.6),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // API 계정 설정
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('이카운트 API 계정', style: AppText.heading3),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _companyCodeCtrl,
+                  decoration: const InputDecoration(labelText: '회사코드 (6자리)', prefixIcon: Icon(Icons.business_outlined, size: 16), isDense: true, hintText: '예: 610550'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _userIdCtrl,
+                  decoration: const InputDecoration(labelText: '담당자 ID', prefixIcon: Icon(Icons.person_outline, size: 16), isDense: true),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _apiKeyCtrl,
+                  obscureText: _obscureKey,
+                  decoration: InputDecoration(
+                    labelText: 'API 인증키',
+                    prefixIcon: const Icon(Icons.vpn_key_outlined, size: 16),
+                    isDense: true,
+                    hintText: '저장된 키 사용 (변경 시에만 입력)',
+                    helperText: '비워두면 이전에 저장한 API 인증키를 자동 사용합니다',
+                    helperStyle: const TextStyle(fontSize: 11),
+                    suffixIcon: IconButton(
+                      icon: Icon(_obscureKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 16),
+                      onPressed: () => setState(() => _obscureKey = !_obscureKey),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // 기본 코드 설정
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('기본 코드 설정', style: AppText.heading3),
+                const SizedBox(height: 6),
+                const Text('아래 기본값은 전송 탭에서 자동으로 채워집니다.', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _defaultWhCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '기본 창고코드',
+                    hintText: '예: 100',
+                    helperText: '이카운트 [재고] → [창고] 메뉴에서 확인',
+                    prefixIcon: Icon(Icons.warehouse_outlined, size: 16),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _defaultProdCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '기본 품목코드',
+                    hintText: '예: FEED001',
+                    helperText: '이카운트 [재고] → [품목] 메뉴에서 확인',
+                    prefixIcon: Icon(Icons.inventory_2_outlined, size: 16),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _defaultEmpCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '기본 담당자코드',
+                    hintText: '이카운트 사용자 ID',
+                    prefixIcon: Icon(Icons.badge_outlined, size: 16),
+                    isDense: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // 상태 메시지
+          if (_configStatus != null) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _configStatus!.startsWith('✅') ? AppTheme.primary.withValues(alpha: 0.08) : AppTheme.danger.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(_configStatus!, style: TextStyle(fontSize: 12, color: _configStatus!.startsWith('✅') ? AppTheme.primary : AppTheme.danger, height: 1.5)),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // 버튼
+          Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _configLoading ? null : _testConnection,
+                icon: _configLoading
+                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.wifi_tethering_outlined, size: 16),
+                label: const Text('연결 테스트'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _configLoading ? null : _saveConfig,
+                icon: const Icon(Icons.save_outlined, size: 16),
+                label: const Text('설정 저장'),
+              ),
+            ),
+          ]),
+        ],
       ),
     );
   }
