@@ -118,9 +118,9 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
   Future<void> _testConnection() async {
     final code = _companyCodeCtrl.text.trim();
     final user = _userIdCtrl.text.trim();
-    final key = _apiKeyCtrl.text.trim();
-    if (code.isEmpty || user.isEmpty || key.isEmpty) {
-      setState(() => _configStatus = '회사코드, 아이디, API 인증키를 입력하세요.');
+    final key = _apiKeyCtrl.text.trim(); // 비어있으면 서버가 저장된 키 사용
+    if (code.isEmpty || user.isEmpty) {
+      setState(() => _configStatus = '회사코드와 아이디를 입력하세요.');
       return;
     }
     setState(() { _configLoading = true; _configStatus = 'Zone 조회 및 연결 테스트 중...'; _sessionId = null; });
@@ -700,7 +700,9 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
                       labelText: 'API 인증키',
                       prefixIcon: const Icon(Icons.vpn_key_outlined, size: 16),
                       isDense: true,
-                      hintText: '이카운트에서 발급한 API 인증키를 입력하세요',
+                      hintText: '저장된 키 사용 (변경 시에만 입력)',
+                      helperText: '비워두면 이전에 저장한 API 인증키를 자동 사용합니다',
+                      helperStyle: const TextStyle(fontSize: 11),
                       suffixIcon: IconButton(
                         icon: Icon(_obscureKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 16),
                         onPressed: () => setState(() => _obscureKey = !_obscureKey),

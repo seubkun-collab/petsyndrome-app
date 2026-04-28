@@ -404,13 +404,17 @@ export default {
     // Flutter 쪽에서 apiCertKey 또는 password 필드로 보낼 수 있으므로 양쪽 모두 수용
     if (path === '/api/icount/session' && method === 'POST') {
       const body = await request.json();
-      // apiCertKey, password 둘 다 허용
       const companyCode = body.companyCode;
       const userId = body.userId;
-      const apiCertKey = body.apiCertKey || body.password;
       const zoneOverride = body.zone;
+      // apiCertKey가 비어있거나 마스킹값이면 KV에서 저장된 키 사용
+      let apiCertKey = body.apiCertKey || body.password || '';
+      if (!apiCertKey || apiCertKey === '***saved***') {
+        const savedCfg = await kvGet(kv, 'icount_config', null);
+        apiCertKey = savedCfg?.apiCertKey || '';
+      }
       if (!companyCode || !userId || !apiCertKey) {
-        return err('companyCode, userId, apiCertKey(또는 password) 가 필요합니다.');
+        return err('companyCode, userId, apiCertKey 가 필요합니다. 설정에서 API 인증키를 저장해주세요.');
       }
       try {
         // 1단계: Zone 자동 조회
