@@ -20,6 +20,7 @@ class _AdminShellState extends State<AdminShell> {
     _NavItem(icon: Icons.build_outlined, label: '작업비 관리', route: '/admin/workcost'),
     _NavItem(icon: Icons.analytics_outlined, label: '원가 조회', route: '/admin/overview'),
     _NavItem(icon: Icons.receipt_long_outlined, label: '단가 견적 이력', route: '/admin/recipes'),
+    _NavItem(icon: Icons.description_outlined, label: '이카운트 견적서', route: '/admin/icount'),
     _NavItem(icon: Icons.settings_outlined, label: '시스템 설정', route: '/admin/settings'),
   ];
 

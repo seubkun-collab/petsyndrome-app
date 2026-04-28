@@ -6,7 +6,9 @@ import '../screens/admin/work_cost_screen.dart';
 import '../screens/admin/cost_overview_screen.dart';
 import '../screens/admin/recipe_list_screen.dart';
 import '../screens/admin/system_settings_screen.dart';
+import '../screens/admin/icount_estimate_screen.dart';
 import '../screens/customer/customer_screen.dart';
+import '../screens/customer/register_screen.dart';
 import '../services/data_service.dart';
 
 final appRouter = GoRouter(
@@ -24,6 +26,9 @@ final appRouter = GoRouter(
     // 고객 페이지 (메인)
     GoRoute(path: '/', builder: (_, __) => const CustomerScreen()),
 
+    // 가입 신청 페이지
+    GoRoute(path: '/register', builder: (_, __) => const RegisterScreen()),
+
     // 관리자 로그인
     GoRoute(path: '/admin/login', builder: (_, __) => const LoginScreen()),
 
@@ -35,6 +40,7 @@ final appRouter = GoRouter(
         GoRoute(path: '/admin/workcost', builder: (_, __) => const WorkCostScreen()),
         GoRoute(path: '/admin/overview', builder: (_, __) => const CostOverviewScreen()),
         GoRoute(path: '/admin/recipes', builder: (_, __) => const RecipeListScreen()),
+        GoRoute(path: '/admin/icount', builder: (_, __) => const ICountEstimateScreen()),
         GoRoute(path: '/admin/settings', builder: (_, __) => const SystemSettingsScreen()),
       ],
     ),

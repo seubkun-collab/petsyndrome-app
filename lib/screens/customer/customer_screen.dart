@@ -661,26 +661,32 @@ class _CustomerScreenState extends State<CustomerScreen> {
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           if (!_isWorkerLoggedIn) ...[
+                            // 로그인 + 가입 버튼 나란히
                             Row(
                               children: [
                                 Expanded(
-                                  child: TextField(
-                                    controller: _workerCtrl,
-                                    decoration: const InputDecoration(
-                                      hintText: '작업자 이름',
-                                      prefixIcon: Icon(Icons.person_outline, size: 18),
-                                      isDense: true,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _showWorkerLoginDialog,
+                                    icon: const Icon(Icons.login, size: 16),
+                                    label: const Text('로그인'),
+                                    style: ElevatedButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                                     ),
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                TextButton.icon(
-                                  onPressed: () => _showWorkerLoginDialog(),
-                                  icon: const Icon(Icons.login, size: 14),
-                                  label: const Text('로그인', style: TextStyle(fontSize: 12)),
-                                  style: TextButton.styleFrom(
-                                    foregroundColor: AppTheme.primary,
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: () => context.push('/register'),
+                                    icon: const Icon(Icons.person_add_outlined, size: 16),
+                                    label: const Text('가입 신청'),
+                                    style: OutlinedButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                                      foregroundColor: AppTheme.primary,
+                                      side: const BorderSide(color: AppTheme.primary),
+                                    ),
                                   ),
                                 ),
                               ],
@@ -808,13 +814,18 @@ class _CustomerScreenState extends State<CustomerScreen> {
                           const Icon(Icons.lock_outline, size: 16, color: AppTheme.warning),
                           const SizedBox(width: 8),
                           Expanded(child: Text(
-                            '견적 계산을 위해 작업자 로그인이 필요합니다.',
+                            '견적 계산을 위해 로그인이 필요합니다.',
                             style: const TextStyle(fontSize: 12, color: AppTheme.warning),
                           )),
                           TextButton(
                             onPressed: _showWorkerLoginDialog,
                             child: const Text('로그인', style: TextStyle(fontSize: 12)),
-                            style: TextButton.styleFrom(foregroundColor: AppTheme.primary, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                            style: TextButton.styleFrom(foregroundColor: AppTheme.primary, padding: const EdgeInsets.symmetric(horizontal: 6)),
+                          ),
+                          TextButton(
+                            onPressed: () => context.push('/register'),
+                            child: const Text('가입', style: TextStyle(fontSize: 12)),
+                            style: TextButton.styleFrom(foregroundColor: AppTheme.textSecondary, padding: const EdgeInsets.symmetric(horizontal: 6)),
                           ),
                         ]),
                       ),
