@@ -384,8 +384,8 @@ export default {
       const { companyCode } = body;
       if (!companyCode) return err('companyCode 가 필요합니다.');
       try {
-        // 이카운트 공식 Zone 조회 API 사용
-        const res = await fetch('https://sboapi.ecount.com/OAPI/V2/Zone', {
+        // 이카운트 공식 Zone 조회 API (운영서버)
+        const res = await fetch('https://oapi.ecount.com/OAPI/V2/Zone', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify({ COM_CODE: companyCode }),
@@ -413,11 +413,11 @@ export default {
         return err('companyCode, userId, apiCertKey(또는 password) 가 필요합니다.');
       }
       try {
-        // 1단계: Zone 자동 조회 (zone 파라미터 없거나 auto인 경우)
+        // 1단계: Zone 자동 조회
         let z = zoneOverride && zoneOverride !== 'auto' ? zoneOverride : null;
         if (!z) {
           try {
-            const zRes = await fetch('https://sboapi.ecount.com/OAPI/V2/Zone', {
+            const zRes = await fetch('https://oapi.ecount.com/OAPI/V2/Zone', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
               body: JSON.stringify({ COM_CODE: companyCode }),
@@ -428,11 +428,11 @@ export default {
             z = null;
           }
         }
-        // 2단계: Zone URL 결정
-        // Zone이 있으면 sboapi{ZONE}.ecount.com, 없으면 sboapi.ecount.com 사용
+        // 2단계: 운영서버(oapi)로 로그인
+        // Zone 있으면 oapi{ZONE}.ecount.com, 없으면 oapi.ecount.com
         const loginUrl = z
-          ? `https://sboapi${z}.ecount.com/OAPI/V2/OAPILogin`
-          : 'https://sboapi.ecount.com/OAPI/V2/OAPILogin';
+          ? `https://oapi${z}.ecount.com/OAPI/V2/OAPILogin`
+          : 'https://oapi.ecount.com/OAPI/V2/OAPILogin';
         const loginRes = await fetch(loginUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -451,11 +451,12 @@ export default {
         } catch (_) {
           return err(`이카운트 서버 응답 오류: ${responseText.substring(0, 200)}`, 500);
         }
-        // 이카운트 응답 구조: {Status:200, Data:{SESSION_ID:"..."}}
-        const sessionId = data?.Data?.SESSION_ID || data?.Data?.Datas?.SESSION_ID || null;
-        const statusOk = String(data?.Status) === '200';
+        // 응답 구조: {Status:200, Data:{Code:"00", Datas:{SESSION_ID:"..."}}}
+        const sessionId = data?.Data?.Datas?.SESSION_ID || data?.Data?.SESSION_ID || null;
+        const code = data?.Data?.Code;
+        const statusOk = String(data?.Status) === '200' && code === '00';
         const ok = statusOk && !!sessionId;
-        const errorMsg = ok ? null : (data?.Data?.message || data?.Errors?.[0]?.Message || `Status: ${data?.Status}`);
+        const errorMsg = ok ? null : (data?.Data?.Message || data?.Data?.message || `Code: ${code}`);
         return json({ ok, sessionId, zone: z, error: errorMsg, raw: ok ? undefined : data });
       } catch (e) {
         return err('이카운트 서버 연결 실패: ' + e.message, 500);
@@ -491,10 +492,10 @@ export default {
         })),
       };
 
-      // 먼저 견적서 API 시도, 실패하면 판매 API로 fallback
+      // 운영서버(oapi)로 견적서/판매 API 시도
       const endpoints = [
-        `https://sboapi${z}.ecount.com/OAPI/V2/SaleEstimate/SaveSaleEstimate?SESSION_ID=${sessionId}`,
-        `https://sboapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`,
+        `https://oapi${z}.ecount.com/OAPI/V2/SaleEstimate/SaveSaleEstimate?SESSION_ID=${sessionId}`,
+        `https://oapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`,
       ];
 
       for (const endpoint of endpoints) {
