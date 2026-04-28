@@ -32,9 +32,8 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
   // 이카운트 설정
   final _companyCodeCtrl = TextEditingController();
   final _userIdCtrl = TextEditingController();
-  final _passwordCtrl = TextEditingController();
-  final _zoneCtrl = TextEditingController(text: '1');
-  bool _obscurePw = true;
+  final _apiKeyCtrl = TextEditingController();
+  bool _obscureKey = true;
   bool _configLoading = false;
   bool _sendLoading = false;
   String? _sessionId;
@@ -57,8 +56,7 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     _noteCtrl.dispose();
     _companyCodeCtrl.dispose();
     _userIdCtrl.dispose();
-    _passwordCtrl.dispose();
-    _zoneCtrl.dispose();
+    _apiKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -68,8 +66,7 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
       setState(() {
         _companyCodeCtrl.text = cfg['companyCode'] ?? '';
         _userIdCtrl.text = cfg['userId'] ?? '';
-        _zoneCtrl.text = cfg['zone'] ?? '1';
-        // password는 서버에서 마스킹으로 오므로 빈칸 유지
+        // API 인증키는 서버에서 마스킹으로 오므로 빈칸 유지 (사용자가 매번 입력)
       });
     }
   }
@@ -103,15 +100,14 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
   Future<void> _saveConfig() async {
     final code = _companyCodeCtrl.text.trim();
     final user = _userIdCtrl.text.trim();
-    final pw = _passwordCtrl.text.trim();
-    final zone = _zoneCtrl.text.trim().isEmpty ? '1' : _zoneCtrl.text.trim();
-    if (code.isEmpty || user.isEmpty || pw.isEmpty) {
-      setState(() => _configStatus = '회사코드, 아이디, 비밀번호를 모두 입력하세요.');
+    final key = _apiKeyCtrl.text.trim();
+    if (code.isEmpty || user.isEmpty || key.isEmpty) {
+      setState(() => _configStatus = '회사코드, 아이디, API 인증키를 모두 입력하세요.');
       return;
     }
     setState(() { _configLoading = true; _configStatus = null; });
     final ok = await CloudflareService.icountSaveConfig(
-      companyCode: code, userId: user, password: pw, zone: zone,
+      companyCode: code, userId: user, apiCertKey: key,
     );
     if (mounted) setState(() {
       _configLoading = false;
@@ -122,31 +118,29 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
   Future<void> _testConnection() async {
     final code = _companyCodeCtrl.text.trim();
     final user = _userIdCtrl.text.trim();
-    final pw = _passwordCtrl.text.trim();
-    final zone = _zoneCtrl.text.trim().isEmpty ? '1' : _zoneCtrl.text.trim();
-    if (code.isEmpty || user.isEmpty || pw.isEmpty) {
-      setState(() => _configStatus = '회사코드, 아이디, 비밀번호를 입력하세요.');
+    final key = _apiKeyCtrl.text.trim();
+    if (code.isEmpty || user.isEmpty || key.isEmpty) {
+      setState(() => _configStatus = '회사코드, 아이디, API 인증키를 입력하세요.');
       return;
     }
-    setState(() { _configLoading = true; _configStatus = '연결 테스트 중...'; _sessionId = null; });
+    setState(() { _configLoading = true; _configStatus = 'Zone 조회 및 연결 테스트 중...'; _sessionId = null; });
     final res = await CloudflareService.icountGetSession(
-      companyCode: code, userId: user, password: pw, zone: zone,
+      companyCode: code, userId: user, apiCertKey: key,
     );
     if (mounted) {
       if (res['ok'] == true) {
-        final data = res['data'] as Map<String, dynamic>?;
-        final session = (data?['Data'] as Map<String, dynamic>?)?['SESSION_ID'] as String?;
+        final sessionId = res['sessionId'] as String?;
+        final zone = res['zone'] as String?;
         setState(() {
-          _sessionId = session;
+          _sessionId = sessionId;
           _configLoading = false;
-          _configStatus = session != null
-            ? '✅ 연결 성공! 세션 발급 완료. 이제 견적 전송이 가능합니다.'
-            : '⚠️ 응답은 받았으나 세션 ID가 없습니다. 계정 정보를 확인하세요.';
+          _configStatus = '✅ 연결 성공! (Zone: $zone) 세션 발급 완료. 이제 견적 전송이 가능합니다.';
         });
       } else {
+        final errMsg = res['error'] as String? ?? (res['raw'] != null ? res['raw'].toString() : '알 수 없는 오류');
         setState(() {
           _configLoading = false;
-          _configStatus = '❌ 연결 실패: ${res['error'] ?? '알 수 없는 오류'}';
+          _configStatus = '❌ 연결 실패: $errMsg';
         });
       }
     }
@@ -175,7 +169,7 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
 
     final today = DateTime.now();
     final dateStr = '${today.year}${today.month.toString().padLeft(2,'0')}${today.day.toString().padLeft(2,'0')}';
-    final zone = _zoneCtrl.text.trim().isEmpty ? '1' : _zoneCtrl.text.trim();
+    // zone은 세션 로그인 시 자동으로 결정됨 (worker.js에서 처리)
 
     final items = _selectedRecipes.map((r) {
       final ingNames = r.items.map((it) => it.ingredientName).join('+');
@@ -194,7 +188,6 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
     final res = await CloudflareService.icountSendEstimate(
       sessionId: _sessionId!,
       items: items,
-      zone: zone,
     );
 
     if (mounted) {
@@ -653,10 +646,10 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
                   ]),
                   SizedBox(height: 8),
                   Text(
-                    '1. 이카운트 로그인 → 시스템설정 → 오픈 API\n'
-                    '2. API 사용 활성화 후 테스트 인증키 발급\n'
-                    '3. 아래에 회사코드(6자리), 담당자 ID, 비밀번호 입력\n'
-                    '4. [연결 테스트] 버튼으로 세션 확인 후 견적 전송',
+                    '1. 이카운트 로그인 → 정보관리 → 오픈 API\n'
+                    '2. API 인증키 발급 (테스트키 가능)\n'
+                    '3. 아래에 회사코드(6자리), 담당자 ID, API 인증키 입력\n'
+                    '4. [연결 테스트] 버튼으로 Zone 자동 감지 및 세션 확인 후 견적 전송',
                     style: TextStyle(fontSize: 12, color: AppTheme.info, height: 1.6),
                   ),
                 ],
@@ -679,7 +672,6 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
 
                   Row(children: [
                     Expanded(
-                      flex: 2,
                       child: TextField(
                         controller: _companyCodeCtrl,
                         decoration: const InputDecoration(
@@ -688,18 +680,6 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
                           isDense: true,
                           hintText: '예: 123456',
                         ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextField(
-                        controller: _zoneCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Zone',
-                          isDense: true,
-                          hintText: '1',
-                        ),
-                        keyboardType: TextInputType.number,
                       ),
                     ),
                   ]),
@@ -714,16 +694,16 @@ class _ICountEstimateScreenState extends State<ICountEstimateScreen>
                   ),
                   const SizedBox(height: 12),
                   TextField(
-                    controller: _passwordCtrl,
-                    obscureText: _obscurePw,
+                    controller: _apiKeyCtrl,
+                    obscureText: _obscureKey,
                     decoration: InputDecoration(
-                      labelText: '비밀번호',
-                      prefixIcon: const Icon(Icons.lock_outline, size: 16),
+                      labelText: 'API 인증키',
+                      prefixIcon: const Icon(Icons.vpn_key_outlined, size: 16),
                       isDense: true,
-                      hintText: '변경 시에만 입력',
+                      hintText: '이카운트에서 발급한 API 인증키를 입력하세요',
                       suffixIcon: IconButton(
-                        icon: Icon(_obscurePw ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 16),
-                        onPressed: () => setState(() => _obscurePw = !_obscurePw),
+                        icon: Icon(_obscureKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 16),
+                        onPressed: () => setState(() => _obscureKey = !_obscureKey),
                       ),
                     ),
                   ),

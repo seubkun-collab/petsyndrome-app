@@ -525,14 +525,19 @@ class CloudflareService {
   static Future<Map<String, dynamic>> icountGetSession({
     required String companyCode,
     required String userId,
-    required String password,
-    String zone = '1',
+    required String apiCertKey,
+    String zone = 'auto',
   }) async {
     try {
       final res = await http.post(
         Uri.parse('$baseUrl/api/icount/session'),
         headers: _headers,
-        body: jsonEncode({'companyCode': companyCode, 'userId': userId, 'password': password, 'zone': zone}),
+        body: jsonEncode({
+          'companyCode': companyCode,
+          'userId': userId,
+          'apiCertKey': apiCertKey,
+          'zone': zone,
+        }),
       ).timeout(_timeout);
       return jsonDecode(res.body) as Map<String, dynamic>;
     } catch (e) {
@@ -575,14 +580,19 @@ class CloudflareService {
   static Future<bool> icountSaveConfig({
     required String companyCode,
     required String userId,
-    required String password,
-    String zone = '1',
+    required String apiCertKey,
+    String zone = 'auto',
   }) async {
     try {
       final res = await http.post(
         Uri.parse('$baseUrl/api/icount/config'),
         headers: _headers,
-        body: jsonEncode({'companyCode': companyCode, 'userId': userId, 'password': password, 'zone': zone}),
+        body: jsonEncode({
+          'companyCode': companyCode,
+          'userId': userId,
+          'apiCertKey': apiCertKey,
+          'zone': zone,
+        }),
       ).timeout(_timeout);
       return res.statusCode == 200;
     } catch (e) {

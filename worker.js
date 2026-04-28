@@ -378,36 +378,91 @@ export default {
     }
 
     // ── 이카운트 ERP API 프록시 ──
-    // 세션 로그인 (회사코드 + USER_ID + PW → SESSION_ID 획득)
+    // Zone 조회 (로그인 전에 회사코드로 zone 파악)
+    if (path === '/api/icount/zone' && method === 'POST') {
+      const body = await request.json();
+      const { companyCode } = body;
+      if (!companyCode) return err('companyCode 가 필요합니다.');
+      try {
+        // 이카운트 공식 Zone 조회 API 사용
+        const res = await fetch('https://sboapi.ecount.com/OAPI/V2/Zone', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ COM_CODE: companyCode }),
+        });
+        const data = await res.json();
+        // 정상: {Status:200, Data:{ZONE:"1"}} or {Data:{ZONE:1}}
+        const zone = data?.Data?.ZONE ? String(data.Data.ZONE) : null;
+        if (zone) return json({ ok: true, zone });
+        return json({ ok: false, zone: null, message: data?.Data?.message || 'Zone 조회 실패', raw: data });
+      } catch (e) {
+        return err('Zone 조회 실패: ' + e.message, 500);
+      }
+    }
+
+    // 세션 로그인 (회사코드 + USER_ID + API_CERT_KEY → SESSION_ID 획득)
+    // Flutter 쪽에서 apiCertKey 또는 password 필드로 보낼 수 있으므로 양쪽 모두 수용
     if (path === '/api/icount/session' && method === 'POST') {
       const body = await request.json();
-      const { companyCode, userId, password, zone } = body;
-      if (!companyCode || !userId || !password) {
-        return err('companyCode, userId, password 가 필요합니다.');
+      // apiCertKey, password 둘 다 허용
+      const companyCode = body.companyCode;
+      const userId = body.userId;
+      const apiCertKey = body.apiCertKey || body.password;
+      const zoneOverride = body.zone;
+      if (!companyCode || !userId || !apiCertKey) {
+        return err('companyCode, userId, apiCertKey(또는 password) 가 필요합니다.');
       }
-      const z = zone || '1';
       try {
-        const res = await fetch(`https://oapi${z}.ecount.com/OAPI/V2/Session/GetSessionID`, {
+        // 1단계: Zone 자동 조회 (zone 파라미터 없거나 auto인 경우)
+        let z = zoneOverride && zoneOverride !== 'auto' ? zoneOverride : null;
+        if (!z) {
+          try {
+            const zRes = await fetch('https://sboapi.ecount.com/OAPI/V2/Zone', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({ COM_CODE: companyCode }),
+            });
+            const zData = await zRes.json();
+            z = zData?.Data?.ZONE ? String(zData.Data.ZONE) : null;
+          } catch (_) {
+            z = null;
+          }
+        }
+        // 2단계: Zone URL 결정
+        // Zone이 있으면 sboapi{ZONE}.ecount.com, 없으면 sboapi.ecount.com 사용
+        const loginUrl = z
+          ? `https://sboapi${z}.ecount.com/OAPI/V2/OAPILogin`
+          : 'https://sboapi.ecount.com/OAPI/V2/OAPILogin';
+        const loginRes = await fetch(loginUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify({
             COM_CODE: companyCode,
             USER_ID: userId,
-            PW: password,
-            ZONE: z,
-            LANG: 'ko_KR',
-            DEVICE_CATE: 'pc',
-            PUSH_TOKEN: '',
+            API_CERT_KEY: apiCertKey,
+            LAN_TYPE: 'ko-KR',
+            ZONE: z || '',
           }),
         });
-        const data = await res.json();
-        return json({ ok: data.Status === '200', data });
+        let data;
+        const responseText = await loginRes.text();
+        try {
+          data = JSON.parse(responseText);
+        } catch (_) {
+          return err(`이카운트 서버 응답 오류: ${responseText.substring(0, 200)}`, 500);
+        }
+        // 이카운트 응답 구조: {Status:200, Data:{SESSION_ID:"..."}}
+        const sessionId = data?.Data?.SESSION_ID || data?.Data?.Datas?.SESSION_ID || null;
+        const statusOk = String(data?.Status) === '200';
+        const ok = statusOk && !!sessionId;
+        const errorMsg = ok ? null : (data?.Data?.message || data?.Errors?.[0]?.Message || `Status: ${data?.Status}`);
+        return json({ ok, sessionId, zone: z, error: errorMsg, raw: ok ? undefined : data });
       } catch (e) {
         return err('이카운트 서버 연결 실패: ' + e.message, 500);
       }
     }
 
-    // 견적서 저장 (/api/icount/estimate)
+    // 견적서 저장 (/api/icount/estimate) - SaveSaleEstimate 또는 SaveSale
     if (path === '/api/icount/estimate' && method === 'POST') {
       const body = await request.json();
       const { sessionId, zone, estimateItems } = body;
@@ -415,53 +470,70 @@ export default {
         return err('sessionId 와 estimateItems 가 필요합니다.');
       }
       const z = zone || '1';
-      // 이카운트 견적서 API (EstimateList 사용)
-      // 이카운트 ERP에 견적서 기능이 없을 경우 판매입력(Sale)으로 대체 가능
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+
+      // 이카운트 판매견적 API
       const icountBody = {
         SaleList: estimateItems.map((item, idx) => ({
           Line: String(idx),
           BulkDatas: {
-            IO_DATE: item.date || new Date().toISOString().slice(0,10).replace(/-/g,''),
-            CUST: item.customerCode || '',
+            IO_DATE: item.date || dateStr,
             CUST_DES: item.customerName || '',
+            CUST: item.customerCode || '',
             PROD_CD: item.productCode || '',
             PROD_DES: item.productName || '',
             QTY: String(item.qty || 1),
             PRICE: String(Math.round(item.unitPrice || 0)),
             SUPPLY_AMT: String(Math.round((item.unitPrice || 0) * (item.qty || 1))),
             REMARKS: item.note || '',
-            WH_CD: '',
           },
         })),
       };
-      try {
-        const res = await fetch(`https://oapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(icountBody),
-        });
-        const data = await res.json();
-        return json({ ok: data.Status === '200', data });
-      } catch (e) {
-        return err('이카운트 서버 연결 실패: ' + e.message, 500);
+
+      // 먼저 견적서 API 시도, 실패하면 판매 API로 fallback
+      const endpoints = [
+        `https://sboapi${z}.ecount.com/OAPI/V2/SaleEstimate/SaveSaleEstimate?SESSION_ID=${sessionId}`,
+        `https://sboapi${z}.ecount.com/OAPI/V2/Sale/SaveSale?SESSION_ID=${sessionId}`,
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(icountBody),
+          });
+          const data = await res.json();
+          if (data?.Status === '200') {
+            return json({ ok: true, endpoint, data });
+          }
+        } catch (_) {}
       }
+      return err('이카운트 견적서 전송 실패. 품목코드 또는 창고코드를 확인하세요.', 400);
     }
 
-    // 이카운트 설정 저장/조회 (KV 저장)
+    // 이카운트 설정 저장/조회 (KV 저장) - apiCertKey 기반
     if (path === '/api/icount/config' && method === 'GET') {
       const cfg = await kvGet(kv, 'icount_config', null);
-      // 비밀번호는 마스킹
-      if (cfg) return json({ ...cfg, password: '***' });
+      if (cfg) return json({ ...cfg, apiCertKey: cfg.apiCertKey ? '***saved***' : '', password: cfg.apiCertKey ? '***saved***' : '' });
       return json(null);
     }
 
     if (path === '/api/icount/config' && method === 'POST') {
       const body = await request.json();
-      const { companyCode, userId, password, zone } = body;
-      if (!companyCode || !userId || !password) {
-        return err('companyCode, userId, password 가 필요합니다.');
+      // apiCertKey 또는 password 필드 모두 수용
+      const companyCode = body.companyCode;
+      const userId = body.userId;
+      const apiCertKey = body.apiCertKey || body.password;
+      const zone = body.zone;
+      if (!companyCode || !userId || !apiCertKey) {
+        return err('companyCode, userId, apiCertKey 가 필요합니다.');
       }
-      await kvPut(kv, 'icount_config', { companyCode, userId, password, zone: zone || '1', updatedAt: new Date().toISOString() });
+      await kvPut(kv, 'icount_config', {
+        companyCode, userId, apiCertKey, zone: zone || '1',
+        updatedAt: new Date().toISOString(),
+      });
       return json({ ok: true });
     }
 
