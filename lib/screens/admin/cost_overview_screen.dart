@@ -655,7 +655,13 @@ class _QuickEditDialog extends StatefulWidget {
 class _QuickEditDialogState extends State<_QuickEditDialog> {
   late final TextEditingController _priceCtrl;
   late final TextEditingController _moistureCtrl;
+  late final TextEditingController _ref300Ctrl;
   bool _saving = false;
+
+  double get _yieldRate {
+    final m = double.tryParse(_moistureCtrl.text.trim()) ?? 0;
+    return (100 - m).clamp(0, 100);
+  }
 
   @override
   void initState() {
@@ -663,12 +669,18 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
     _priceCtrl = TextEditingController(text: widget.ingredient.unitPrice.toStringAsFixed(0));
     _moistureCtrl = TextEditingController(
         text: (widget.ingredient.moisture * 100).toStringAsFixed(1));
+    _ref300Ctrl = TextEditingController(
+        text: widget.ingredient.ref300ccWeightG > 0
+            ? widget.ingredient.ref300ccWeightG.toStringAsFixed(0)
+            : '');
+    _moistureCtrl.addListener(() => setState(() {}));
   }
 
   @override
   void dispose() {
     _priceCtrl.dispose();
     _moistureCtrl.dispose();
+    _ref300Ctrl.dispose();
     super.dispose();
   }
 
@@ -676,6 +688,7 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
     final price = double.tryParse(_priceCtrl.text.trim());
     final moisture = double.tryParse(_moistureCtrl.text.trim());
     if (price == null || moisture == null) return;
+    final ref300 = double.tryParse(_ref300Ctrl.text.trim()) ?? 0.0;
     setState(() => _saving = true);
     final ing = widget.ingredient;
     final updated = Ingredient(
@@ -691,6 +704,7 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
       calcium: ing.calcium,
       phosphorus: ing.phosphorus,
       bulkWeightKg: ing.bulkWeightKg,
+      ref300ccWeightG: ref300,
       createdAt: ing.createdAt,
     );
     await DataService.saveIngredient(updated);
@@ -700,11 +714,16 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
 
   @override
   Widget build(BuildContext context) {
+    // 수분율로 용기별 예상 건조 중량 계산
+    final moisture = double.tryParse(_moistureCtrl.text.trim()) ?? (widget.ingredient.moisture * 100);
+    final yieldFrac = (100 - moisture) / 100.0;
+    final containers = [300, 400, 500, 600, 700, 1000];
+
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: Padding(
+        constraints: const BoxConstraints(maxWidth: 400),
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -726,7 +745,8 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
                 ),
               ]),
               const Divider(height: 20),
-              // 원물단가
+
+              // ── 원물단가 ──
               const Text('원물단가 (원/kg)', style: AppText.label),
               const SizedBox(height: 6),
               TextField(
@@ -740,8 +760,23 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
                 autofocus: true,
               ),
               const SizedBox(height: 14),
-              // 수분율 (수율 자동 표시)
-              const Text('수분율 (%)', style: AppText.label),
+
+              // ── 수분율 + 수율 자동 표시 ──
+              Row(children: [
+                const Text('수분율 (%)', style: AppText.label),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '수율 ${_yieldRate.toStringAsFixed(1)}%',
+                    style: const TextStyle(fontSize: 11, color: AppTheme.primary, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ]),
               const SizedBox(height: 6),
               TextField(
                 controller: _moistureCtrl,
@@ -750,13 +785,79 @@ class _QuickEditDialogState extends State<_QuickEditDialog> {
                   suffixText: '%',
                   isDense: true,
                   border: OutlineInputBorder(),
+                  hintText: '예: 76.5',
                 ),
               ),
+              const SizedBox(height: 14),
+
+              // ── 300cc 기준 중량 ──
+              Row(children: [
+                const Text('300cc 기준 건조 중량 (g)', style: AppText.label),
+                const SizedBox(width: 6),
+                Tooltip(
+                  message: '300cc 통에 실제로 담기는 건조 중량(g)\n미입력 시 수율로 자동 계산됩니다.',
+                  child: const Icon(Icons.help_outline, size: 14, color: AppTheme.textSecondary),
+                ),
+              ]),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _ref300Ctrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                  suffixText: 'g',
+                  isDense: true,
+                  border: const OutlineInputBorder(),
+                  hintText: yieldFrac > 0
+                      ? '자동: ${(300 / 9.0 * yieldFrac).toStringAsFixed(0)}g (수율 기준)'
+                      : '예: 50',
+                ),
+              ),
+
+              // ── 용기별 예상 건조 중량 미리보기 ──
+              if (yieldFrac > 0) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primary.withValues(alpha: 0.04),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.primary.withValues(alpha: 0.15)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('용기별 예상 건조 중량 (수율 기준)',
+                        style: TextStyle(fontSize: 11, color: AppTheme.primary, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: containers.map((cc) {
+                          final dryG = (cc / 9.0) * yieldFrac;
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppTheme.surface,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: AppTheme.border),
+                            ),
+                            child: Text(
+                              '${cc}cc ≈ ${dryG.toStringAsFixed(0)}g',
+                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
               const SizedBox(height: 20),
               ElevatedButton.icon(
                 onPressed: _saving ? null : _save,
                 icon: _saving
-                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.save_outlined, size: 16),
                 label: Text(_saving ? '저장 중...' : '저장'),
                 style: ElevatedButton.styleFrom(
