@@ -1,6 +1,13 @@
 /**
  * 펫신드룸 단가 계산 시스템 - Cloudflare Workers 백엔드
  * KV 저장소를 사용해 원물/작업비/포장/레시피 데이터를 서버에 영속 저장
+ *
+ * 보안 개선 사항:
+ *  1. 관리자 ID/PW → env.ADMIN_ID / env.ADMIN_PW (wrangler secret)
+ *  2. 직원 PIN → SHA-256 해시 후 KV 저장
+ *  3. seeded_v1 전역 메모리 캐시로 중복 KV 읽기 방지
+ *  4. /api/seed Bearer 토큰 → env.SEED_TOKEN (wrangler secret)
+ *  5. SESSION_ID에서 Zone 파싱 제거 → 로그인 시 KV에 저장된 Zone 사용
  */
 
 // ── CORS 헤더 ──
@@ -19,6 +26,18 @@ function json(data, status = 200) {
 
 function err(msg, status = 400) {
   return json({ error: msg }, status);
+}
+
+// ── 전역 seeded 캐시 (워커 인스턴스 수명 동안 유지, KV 중복 읽기 방지) ──
+let _seededCache = false;
+
+// ── SHA-256 해시 헬퍼 (Web Crypto API - Cloudflare Workers 기본 지원) ──
+async function sha256(text) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(text);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ── 기본 초기 데이터 ──
@@ -72,16 +91,23 @@ async function kvPut(kv, key, value) {
   await kv.put(key, JSON.stringify(value));
 }
 
-// ── 초기 데이터 시드 ──
+// ── 초기 데이터 시드 (전역 캐시로 중복 KV 읽기 방지) ──
 async function ensureSeeded(kv) {
+  // 워커 인스턴스 메모리에 이미 seeded로 표시되면 KV 조회 생략
+  if (_seededCache) return;
+
   const seeded = await kv.get('seeded_v1');
-  if (seeded) return;
+  if (seeded) {
+    _seededCache = true; // 이후 요청은 KV 조회 없이 바로 통과
+    return;
+  }
 
   await kvPut(kv, 'ingredients', DEFAULT_INGREDIENTS);
   await kvPut(kv, 'workcost', DEFAULT_WORK_COST);
   await kvPut(kv, 'packagings', DEFAULT_PACKAGINGS);
   await kvPut(kv, 'recipes', []);
   await kv.put('seeded_v1', 'true');
+  _seededCache = true;
 }
 
 // ── 라우터 ──
@@ -98,7 +124,7 @@ export default {
 
     const kv = env.PET_KV;
 
-    // 초기 데이터 보장
+    // 초기 데이터 보장 (전역 캐시 사용으로 KV 읽기 최소화)
     await ensureSeeded(kv);
 
     // ── 원물 (Ingredients) ──
@@ -273,10 +299,16 @@ export default {
       return json({ ok: true });
     }
 
-    // ── 관리자 인증 ──
+    // ── 관리자 인증 (env.ADMIN_ID / env.ADMIN_PW 사용) ──
     if (path === '/api/auth/admin' && method === 'POST') {
       const body = await request.json();
-      if (body.id === 'petsyndrome' && body.pw === 'a29251313') {
+      // wrangler secret으로 등록된 값과 비교 (없으면 빈 문자열 → 항상 실패)
+      const adminId = env.ADMIN_ID || '';
+      const adminPw = env.ADMIN_PW || '';
+      if (!adminId || !adminPw) {
+        return err('서버 설정 오류: 관리자 계정이 구성되지 않았습니다.', 500);
+      }
+      if (body.id === adminId && body.pw === adminPw) {
         // 로그인 기록 저장
         const logs = await kvGet(kv, 'login_logs', []);
         logs.unshift({ type: 'admin', id: body.id, at: new Date().toISOString(), ip: request.headers.get('CF-Connecting-IP') || '' });
@@ -288,7 +320,8 @@ export default {
     }
 
     // ── 직원(Staff) 계정 관리 ──
-    // 회원가입 신청
+
+    // 회원가입 신청 (PIN → SHA-256 해시 저장)
     if (path === '/api/staff/register' && method === 'POST') {
       const body = await request.json();
       const { name, pin, role } = body; // role: 'staff' | 'customer'
@@ -297,10 +330,11 @@ export default {
       if (accounts.find(a => a.name === name && a.role === (role || 'staff'))) {
         return err('이미 존재하는 계정입니다.');
       }
+      const pinHash = await sha256(String(pin)); // PIN 평문 저장 금지
       const newAccount = {
         id: `acc_${Date.now()}`,
         name,
-        pin,
+        pinHash,          // 해시만 저장
         role: role || 'staff',
         status: 'pending', // 'pending' | 'approved' | 'rejected'
         createdAt: new Date().toISOString(),
@@ -312,15 +346,30 @@ export default {
       return json({ ok: true, message: '가입 신청이 완료되었습니다. 관리자 승인 후 로그인 가능합니다.' }, 201);
     }
 
-    // 로그인
+    // 로그인 (입력 PIN을 SHA-256 해시 후 저장값과 비교)
     if (path === '/api/staff/login' && method === 'POST') {
       const body = await request.json();
       const { name, pin, role } = body;
       const accounts = await kvGet(kv, 'accounts', []);
-      const acc = accounts.find(a => a.name === name && a.pin === pin && a.role === (role || 'staff'));
+      // 기존 계정은 pin(평문) 또는 pinHash(해시) 중 하나로 저장될 수 있으므로 양쪽 모두 허용
+      const inputHash = await sha256(String(pin));
+      const acc = accounts.find(a =>
+        a.name === name &&
+        a.role === (role || 'staff') &&
+        (a.pinHash === inputHash || a.pin === String(pin)) // 마이그레이션 호환
+      );
       if (!acc) return err('이름 또는 PIN이 올바르지 않습니다.', 401);
       if (acc.status === 'pending') return err('관리자 승인 대기 중입니다.', 403);
       if (acc.status === 'rejected') return err('가입이 거부되었습니다. 관리자에게 문의하세요.', 403);
+
+      // 평문 PIN이 남아있는 기존 계정을 자동으로 해시로 마이그레이션
+      if (acc.pin) {
+        const idx = accounts.findIndex(a => a.id === acc.id);
+        accounts[idx].pinHash = inputHash;
+        delete accounts[idx].pin;
+        await kvPut(kv, 'accounts', accounts);
+      }
+
       // 로그인 기록
       const logs = await kvGet(kv, 'login_logs', []);
       logs.unshift({ type: role || 'staff', name, at: new Date().toISOString(), ip: request.headers.get('CF-Connecting-IP') || '' });
@@ -332,13 +381,19 @@ export default {
     // 대기중 계정 목록 (관리자 전용)
     if (path === '/api/staff/pending' && method === 'GET') {
       const accounts = await kvGet(kv, 'accounts', []);
-      return json(accounts.filter(a => a.status === 'pending'));
+      return json(accounts.filter(a => a.status === 'pending').map(a => {
+        const { pin, pinHash, ...safe } = a; // PIN/해시 노출 방지
+        return safe;
+      }));
     }
 
     // 전체 계정 목록 (관리자 전용)
     if (path === '/api/staff/list' && method === 'GET') {
       const accounts = await kvGet(kv, 'accounts', []);
-      return json(accounts.map(a => ({ ...a, pin: '***' }))); // PIN 마스킹
+      return json(accounts.map(a => {
+        const { pin, pinHash, ...safe } = a; // PIN/해시 노출 방지
+        return safe;
+      }));
     }
 
     // 계정 승인/거부 (관리자 전용)
@@ -351,7 +406,7 @@ export default {
       if (idx === -1) return err('계정을 찾을 수 없습니다.', 404);
       accounts[idx].status = action === 'approve' ? 'approved' : 'rejected';
       accounts[idx].approvedAt = new Date().toISOString();
-      accounts[idx].approvedBy = body.approvedBy || 'petsyndrome';
+      accounts[idx].approvedBy = body.approvedBy || (env.ADMIN_ID || 'admin');
       await kvPut(kv, 'accounts', accounts);
       return json({ ok: true });
     }
@@ -378,20 +433,19 @@ export default {
     }
 
     // ── 이카운트 ERP API 프록시 ──
+
     // Zone 조회 (로그인 전에 회사코드로 zone 파악)
     if (path === '/api/icount/zone' && method === 'POST') {
       const body = await request.json();
       const { companyCode } = body;
       if (!companyCode) return err('companyCode 가 필요합니다.');
       try {
-        // 이카운트 공식 Zone 조회 API (운영서버)
         const res = await fetch('https://oapi.ecount.com/OAPI/V2/Zone', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify({ COM_CODE: companyCode }),
         });
         const data = await res.json();
-        // 정상: {Status:200, Data:{ZONE:"1"}} or {Data:{ZONE:1}}
         const zone = data?.Data?.ZONE ? String(data.Data.ZONE) : null;
         if (zone) return json({ ok: true, zone });
         return json({ ok: false, zone: null, message: data?.Data?.message || 'Zone 조회 실패', raw: data });
@@ -401,7 +455,7 @@ export default {
     }
 
     // 세션 로그인 (회사코드 + USER_ID + API_CERT_KEY → SESSION_ID 획득)
-    // Flutter 쪽에서 apiCertKey 또는 password 필드로 보낼 수 있으므로 양쪽 모두 수용
+    // 로그인 성공 시 zone을 KV에 저장하여 이후 SESSION_ID 파싱에 의존하지 않음
     if (path === '/api/icount/session' && method === 'POST') {
       const body = await request.json();
       const companyCode = body.companyCode;
@@ -417,7 +471,7 @@ export default {
         return err('companyCode, userId, apiCertKey 가 필요합니다. 설정에서 API 인증키를 저장해주세요.');
       }
       try {
-        // 1단계: Zone 자동 조회
+        // 1단계: Zone 자동 조회 (override가 있으면 그것을 사용)
         let z = zoneOverride && zoneOverride !== 'auto' ? zoneOverride : null;
         if (!z) {
           try {
@@ -432,8 +486,8 @@ export default {
             z = null;
           }
         }
+
         // 2단계: 운영서버(oapi)로 로그인
-        // Zone 있으면 oapi{ZONE}.ecount.com, 없으면 oapi.ecount.com
         const loginUrl = z
           ? `https://oapi${z}.ecount.com/OAPI/V2/OAPILogin`
           : 'https://oapi.ecount.com/OAPI/V2/OAPILogin';
@@ -455,12 +509,20 @@ export default {
         } catch (_) {
           return err(`이카운트 서버 응답 오류: ${responseText.substring(0, 200)}`, 500);
         }
+
         // 응답 구조: {Status:200, Data:{Code:"00", Datas:{SESSION_ID:"..."}}}
         const sessionId = data?.Data?.Datas?.SESSION_ID || data?.Data?.SESSION_ID || null;
         const code = data?.Data?.Code;
         const statusOk = String(data?.Status) === '200' && code === '00';
         const ok = statusOk && !!sessionId;
         const errorMsg = ok ? null : (data?.Data?.Message || data?.Data?.message || `Code: ${code}`);
+
+        // 3단계: 로그인 성공 시 zone을 KV에 저장 (SESSION_ID 파싱 불필요)
+        if (ok && z) {
+          const existingCfg = await kvGet(kv, 'icount_config', {});
+          await kvPut(kv, 'icount_config', { ...existingCfg, lastZone: z, lastZoneAt: new Date().toISOString() });
+        }
+
         return json({ ok, sessionId, zone: z, error: errorMsg, raw: ok ? undefined : data });
       } catch (e) {
         return err('이카운트 서버 연결 실패: ' + e.message, 500);
@@ -474,16 +536,14 @@ export default {
       if (!sessionId || !estimateItems) {
         return err('sessionId 와 estimateItems 가 필요합니다.');
       }
-      // zone은 SESSION_ID에서 자동 감지 (BC- prefix 등)
-      // SESSION_ID 형식: "hex:BC-ETP_xxx" → zone 추출
-      let z = 'BC'; // 기본값
-      try {
-        const parts = sessionId.split(':');
-        if (parts.length > 1) {
-          const zonePart = parts[1].split('-')[0];
-          z = zonePart;
-        }
-      } catch (_) {}
+
+      // Zone: 요청에 명시된 zone → KV에 저장된 lastZone → 기본값 'BC' 순서로 사용
+      // (SESSION_ID 문자열 파싱에 의존하지 않아 형식 변경에 안전)
+      let z = body.zone || null;
+      if (!z) {
+        const cfg = await kvGet(kv, 'icount_config', null);
+        z = cfg?.lastZone || 'BC';
+      }
 
       const today = new Date();
       const dateStr = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
@@ -560,15 +620,20 @@ export default {
         defaultWh: body.defaultWh || existing?.defaultWh || '',
         defaultProd: body.defaultProd || existing?.defaultProd || '',
         defaultEmp: body.defaultEmp || existing?.defaultEmp || '',
+        lastZone: existing?.lastZone || '',
+        lastZoneAt: existing?.lastZoneAt || '',
         updatedAt: new Date().toISOString(),
       });
       return json({ ok: true });
     }
 
-    // ── 데이터 초기화 (관리자 전용) ──
+    // ── 데이터 초기화 (env.SEED_TOKEN 으로 인증) ──
     if (path === '/api/seed' && method === 'POST') {
       const auth = request.headers.get('Authorization');
-      if (auth !== 'Bearer petsyndrome_admin_seed') return err('Unauthorized', 401);
+      const seedToken = env.SEED_TOKEN || '';
+      if (!seedToken) return err('서버 설정 오류: SEED_TOKEN이 구성되지 않았습니다.', 500);
+      if (auth !== `Bearer ${seedToken}`) return err('Unauthorized', 401);
+      _seededCache = false; // 전역 캐시 초기화
       await kv.delete('seeded_v1');
       await ensureSeeded(kv);
       return json({ ok: true, message: '초기 데이터가 복원되었습니다.' });
