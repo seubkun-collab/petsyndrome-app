@@ -36,6 +36,9 @@ class DataService {
     await Hive.openBox(_settingsBox);
     await Hive.openBox(_workerBox);
 
+    // 새로고침 후에도 관리자 로그인이 유지되도록 저장된 토큰을 복원
+    CloudflareService.setAdminToken(adminToken);
+
     // 서버에서 전체 데이터 로드
     await refreshAll();
   }
@@ -180,14 +183,24 @@ class DataService {
     _recipes.removeWhere((r) => r.id == id);
   }
 
-  // ── 관리자 인증 (로컬) ──
-
-  static bool checkLogin(String id, String pw) {
-    return id == 'petsyndrome' && pw == 'a29251313';
-  }
+  // ── 관리자 인증 ──
+  // 실제 검증은 서버(CloudflareService.adminLogin → /api/auth/admin)가 한다.
+  // (예전에는 여기 하드코딩된 비밀번호로 클라이언트가 직접 관리자 여부를 판단했음 — 보안 취약점, 2026-10-10 제거)
 
   static bool get isLoggedIn => Hive.box(_settingsBox).get('loggedIn') == true;
-  static Future<void> setLoggedIn(bool v) async => Hive.box(_settingsBox).put('loggedIn', v);
+
+  static Future<void> setLoggedIn(bool v) async {
+    await Hive.box(_settingsBox).put('loggedIn', v);
+    if (!v) await setAdminToken(null);
+  }
+
+  /// 관리자 세션 토큰을 로컬에 보관해 새로고침 후에도 로그인 상태를 유지한다.
+  static String? get adminToken => Hive.box(_settingsBox).get('adminToken') as String?;
+
+  static Future<void> setAdminToken(String? token) async {
+    await Hive.box(_settingsBox).put('adminToken', token);
+    CloudflareService.setAdminToken(token);
+  }
 
   // ── 작업자 인증 (로컬) ──
 
