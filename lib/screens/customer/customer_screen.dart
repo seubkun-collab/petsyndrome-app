@@ -525,17 +525,19 @@ class _CustomerScreenState extends State<CustomerScreen> {
             }
             setDlgState(() { loading = true; errorMsg = null; });
             bool success = false;
-            // 서버 로그인 시도 (staff 또는 admin)
+            // 서버 로그인 시도 (staff) — 서버가 실제로 검증한다.
             try {
               final res = await CloudflareService.loginAccount(name: name, pin: pin, role: 'staff');
               success = res['ok'] == true;
-              if (!success && res['error'] != null) {
-                setDlgState(() { loading = false; errorMsg = res['error'] as String?; });
+              if (!success) {
+                setDlgState(() { loading = false; errorMsg = res['error'] as String? ?? '이름 또는 PIN이 올바르지 않습니다.'; });
                 return;
               }
             } catch (_) {
-              // 서버 실패 시 로컬 체크로 폴백
-              success = DataService.checkWorkerLogin(name, pin) || DataService.checkLogin(name, pin);
+              // 네트워크 실패 시 로컬 체크로 넘어가지 않고 그대로 실패 처리한다.
+              // (예전에는 여기서 로컬 하드코딩 비밀번호로 로그인이 통과되는 보안 취약점이 있었음 — 2026-10-10 제거)
+              setDlgState(() { loading = false; errorMsg = '서버에 연결할 수 없습니다. 네트워크를 확인해주세요.'; });
+              return;
             }
             if (!ctx.mounted) return;
             if (success) {

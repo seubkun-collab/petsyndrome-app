@@ -8,6 +8,10 @@
  *  3. seeded_v1 전역 메모리 캐시로 중복 KV 읽기 방지
  *  4. /api/seed Bearer 토큰 → env.SEED_TOKEN (wrangler secret)
  *  5. SESSION_ID에서 Zone 파싱 제거 → 로그인 시 KV에 저장된 Zone 사용
+ *  6. 관리자 전용 API → /api/auth/admin 로그인 성공 시 발급되는 세션 토큰
+ *     (Authorization: Bearer <token>)을 KV로 검증. 이전에는 로그인 화면이
+ *     이 API를 호출조차 하지 않고 클라이언트에 하드코딩된 비밀번호로만
+ *     관리자 여부를 판단했음 (2026-10-10 수정).
  */
 
 // ── CORS 헤더 ──
@@ -91,6 +95,21 @@ async function kvPut(kv, key, value) {
   await kv.put(key, JSON.stringify(value));
 }
 
+// ── 관리자 세션 토큰 검증 ──
+// /api/auth/admin 로그인 성공 시 발급된 토큰만 통과시킨다.
+async function requireAdmin(request, kv) {
+  const auth = request.headers.get('Authorization') || '';
+  const match = auth.match(/^Bearer\s+(.+)$/);
+  if (!match) return false;
+  const session = await kv.get(`admin_session:${match[1]}`);
+  return !!session;
+}
+
+async function adminOnly(request, kv) {
+  if (await requireAdmin(request, kv)) return null;
+  return err('관리자 인증이 필요합니다.', 401);
+}
+
 // ── 초기 데이터 시드 (전역 캐시로 중복 KV 읽기 방지) ──
 async function ensureSeeded(kv) {
   // 워커 인스턴스 메모리에 이미 seeded로 표시되면 KV 조회 생략
@@ -134,6 +153,7 @@ export default {
     }
 
     if (path === '/api/ingredients' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const list = await kvGet(kv, 'ingredients', []);
       const newItem = { ...body, updatedAt: new Date().toISOString(), history: body.history || [] };
@@ -145,6 +165,7 @@ export default {
     // PUT /api/ingredients/:id
     const ingPutMatch = path.match(/^\/api\/ingredients\/([^/]+)$/);
     if (ingPutMatch && method === 'PUT') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const id = ingPutMatch[1];
       const body = await request.json();
       const list = await kvGet(kv, 'ingredients', []);
@@ -175,6 +196,7 @@ export default {
     // DELETE /api/ingredients/:id
     const ingDelMatch = path.match(/^\/api\/ingredients\/([^/]+)$/);
     if (ingDelMatch && method === 'DELETE') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const id = ingDelMatch[1];
       let list = await kvGet(kv, 'ingredients', []);
       list = list.filter(i => i.id !== id);
@@ -189,6 +211,7 @@ export default {
     }
 
     if (path === '/api/workcost' && method === 'PUT') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const existing = await kvGet(kv, 'workcost', DEFAULT_WORK_COST);
 
@@ -227,6 +250,7 @@ export default {
     }
 
     if (path === '/api/packagings' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const list = await kvGet(kv, 'packagings', []);
       const newItem = { ...body, updatedAt: new Date().toISOString(), history: body.history || [] };
@@ -237,6 +261,7 @@ export default {
 
     const pkgPutMatch = path.match(/^\/api\/packagings\/([^/]+)$/);
     if (pkgPutMatch && method === 'PUT') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const id = pkgPutMatch[1];
       const body = await request.json();
       const list = await kvGet(kv, 'packagings', []);
@@ -265,6 +290,7 @@ export default {
 
     const pkgDelMatch = path.match(/^\/api\/packagings\/([^/]+)$/);
     if (pkgDelMatch && method === 'DELETE') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const id = pkgDelMatch[1];
       let list = await kvGet(kv, 'packagings', []);
       list = list.filter(p => p.id !== id);
@@ -314,7 +340,11 @@ export default {
         logs.unshift({ type: 'admin', id: body.id, at: new Date().toISOString(), ip: request.headers.get('CF-Connecting-IP') || '' });
         if (logs.length > 500) logs.splice(500);
         await kvPut(kv, 'login_logs', logs);
-        return json({ ok: true });
+
+        // 관리자 전용 API 호출에 쓸 세션 토큰 발급 (12시간 유효)
+        const token = crypto.randomUUID();
+        await kv.put(`admin_session:${token}`, JSON.stringify({ id: body.id, at: new Date().toISOString() }), { expirationTtl: 60 * 60 * 12 });
+        return json({ ok: true, token });
       }
       return err('아이디 또는 비밀번호가 올바르지 않습니다.', 401);
     }
@@ -380,6 +410,7 @@ export default {
 
     // 대기중 계정 목록 (관리자 전용)
     if (path === '/api/staff/pending' && method === 'GET') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const accounts = await kvGet(kv, 'accounts', []);
       return json(accounts.filter(a => a.status === 'pending').map(a => {
         const { pin, pinHash, ...safe } = a; // PIN/해시 노출 방지
@@ -389,6 +420,7 @@ export default {
 
     // 전체 계정 목록 (관리자 전용)
     if (path === '/api/staff/list' && method === 'GET') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const accounts = await kvGet(kv, 'accounts', []);
       return json(accounts.map(a => {
         const { pin, pinHash, ...safe } = a; // PIN/해시 노출 방지
@@ -399,6 +431,7 @@ export default {
     // 계정 승인/거부 (관리자 전용)
     const approveMatch = path.match(/^\/api\/staff\/([^/]+)\/(approve|reject)$/);
     if (approveMatch && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const [, accId, action] = approveMatch;
       const body = await request.json().catch(() => ({}));
       const accounts = await kvGet(kv, 'accounts', []);
@@ -414,6 +447,7 @@ export default {
     // 계정 삭제 (관리자 전용)
     const accDelMatch = path.match(/^\/api\/staff\/([^/]+)$/);
     if (accDelMatch && method === 'DELETE') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const accId = accDelMatch[1];
       let accounts = await kvGet(kv, 'accounts', []);
       accounts = accounts.filter(a => a.id !== accId);
@@ -423,6 +457,7 @@ export default {
 
     // 로그인 기록 조회 (관리자 전용)
     if (path === '/api/logs' && method === 'GET') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const logs = await kvGet(kv, 'login_logs', []);
       return json(logs.slice(0, 100));
     }
@@ -436,6 +471,7 @@ export default {
 
     // Zone 조회 (로그인 전에 회사코드로 zone 파악)
     if (path === '/api/icount/zone' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const { companyCode } = body;
       if (!companyCode) return err('companyCode 가 필요합니다.');
@@ -457,6 +493,7 @@ export default {
     // 세션 로그인 (회사코드 + USER_ID + API_CERT_KEY → SESSION_ID 획득)
     // 로그인 성공 시 zone을 KV에 저장하여 이후 SESSION_ID 파싱에 의존하지 않음
     if (path === '/api/icount/session' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const companyCode = body.companyCode;
       const userId = body.userId;
@@ -531,6 +568,7 @@ export default {
 
     // 견적서 저장 (/api/icount/estimate)
     if (path === '/api/icount/estimate' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const { sessionId, estimateItems } = body;
       if (!sessionId || !estimateItems) {
@@ -596,12 +634,14 @@ export default {
 
     // 이카운트 설정 저장/조회 (KV 저장)
     if (path === '/api/icount/config' && method === 'GET') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const cfg = await kvGet(kv, 'icount_config', null);
       if (cfg) return json({ ...cfg, apiCertKey: cfg.apiCertKey ? '***saved***' : '' });
       return json(null);
     }
 
     if (path === '/api/icount/config' && method === 'POST') {
+      const guard = await adminOnly(request, kv); if (guard) return guard;
       const body = await request.json();
       const companyCode = body.companyCode;
       const userId = body.userId;

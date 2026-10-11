@@ -12,8 +12,21 @@ class CloudflareService {
   static const String baseUrl = 'https://petsyndrome-api.seubkun.workers.dev';
   static const Duration _timeout = Duration(seconds: 15);
 
+  /// /api/auth/admin 로그인 성공 시 발급되는 세션 토큰.
+  /// 관리자 전용 API는 이 토큰을 Authorization 헤더로 보내야 서버가 허용한다.
+  static String? _adminToken;
+
+  static void setAdminToken(String? token) {
+    _adminToken = token;
+  }
+
   static Map<String, String> get _headers => {
         'Content-Type': 'application/json',
+      };
+
+  static Map<String, String> get _adminHeaders => {
+        'Content-Type': 'application/json',
+        if (_adminToken != null) 'Authorization': 'Bearer $_adminToken',
       };
 
   // ── 원물 (Ingredients) ──
@@ -56,7 +69,7 @@ class CloudflareService {
       final res = await http
           .put(
             Uri.parse('$baseUrl/api/ingredients/${ing.id}'),
-            headers: _headers,
+            headers: _adminHeaders,
             body: bodyJson,
           )
           .timeout(_timeout);
@@ -65,7 +78,7 @@ class CloudflareService {
         final postRes = await http
             .post(
               Uri.parse('$baseUrl/api/ingredients'),
-              headers: _headers,
+              headers: _adminHeaders,
               body: bodyJson,
             )
             .timeout(_timeout);
@@ -82,7 +95,7 @@ class CloudflareService {
   static Future<bool> deleteIngredient(String id) async {
     try {
       final res = await http
-          .delete(Uri.parse('$baseUrl/api/ingredients/$id'), headers: _headers)
+          .delete(Uri.parse('$baseUrl/api/ingredients/$id'), headers: _adminHeaders)
           .timeout(_timeout);
       return res.statusCode == 200;
     } catch (e) {
@@ -124,7 +137,7 @@ class CloudflareService {
       final res = await http
           .put(
             Uri.parse('$baseUrl/api/workcost'),
-            headers: _headers,
+            headers: _adminHeaders,
             body: bodyJson,
           )
           .timeout(_timeout);
@@ -170,7 +183,7 @@ class CloudflareService {
       final res = await http
           .put(
             Uri.parse('$baseUrl/api/packagings/${pkg.id}'),
-            headers: _headers,
+            headers: _adminHeaders,
             body: bodyJson,
           )
           .timeout(_timeout);
@@ -179,7 +192,7 @@ class CloudflareService {
         final postRes = await http
             .post(
               Uri.parse('$baseUrl/api/packagings'),
-              headers: _headers,
+              headers: _adminHeaders,
               body: bodyJson,
             )
             .timeout(_timeout);
@@ -195,7 +208,7 @@ class CloudflareService {
   static Future<bool> deletePackaging(String id) async {
     try {
       final res = await http
-          .delete(Uri.parse('$baseUrl/api/packagings/$id'), headers: _headers)
+          .delete(Uri.parse('$baseUrl/api/packagings/$id'), headers: _adminHeaders)
           .timeout(_timeout);
       return res.statusCode == 200;
     } catch (e) {
@@ -460,9 +473,32 @@ class CloudflareService {
     }
   }
 
+  /// 관리자 로그인: 서버(/api/auth/admin)가 실제 검증하고 세션 토큰을 발급한다.
+  /// 이전에는 클라이언트에 하드코딩된 비밀번호로만 관리자 여부를 판단했음(보안 취약점 — 2026-10-10 수정).
+  static Future<Map<String, dynamic>> adminLogin({
+    required String id,
+    required String pw,
+  }) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/auth/admin'),
+        headers: _headers,
+        body: jsonEncode({'id': id, 'pw': pw}),
+      ).timeout(_timeout);
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      if (data['ok'] == true && data['token'] != null) {
+        setAdminToken(data['token'] as String);
+      }
+      return data;
+    } catch (e) {
+      debugPrint('[CF] adminLogin error: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> getPendingAccounts() async {
     try {
-      final res = await http.get(Uri.parse('$baseUrl/api/staff/pending'), headers: _headers).timeout(_timeout);
+      final res = await http.get(Uri.parse('$baseUrl/api/staff/pending'), headers: _adminHeaders).timeout(_timeout);
       if (res.statusCode == 200) {
         return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
       }
@@ -474,7 +510,7 @@ class CloudflareService {
 
   static Future<List<Map<String, dynamic>>> getAllAccounts() async {
     try {
-      final res = await http.get(Uri.parse('$baseUrl/api/staff/list'), headers: _headers).timeout(_timeout);
+      final res = await http.get(Uri.parse('$baseUrl/api/staff/list'), headers: _adminHeaders).timeout(_timeout);
       if (res.statusCode == 200) {
         return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
       }
@@ -489,7 +525,7 @@ class CloudflareService {
       final action = approve ? 'approve' : 'reject';
       final res = await http.post(
         Uri.parse('$baseUrl/api/staff/$id/$action'),
-        headers: _headers,
+        headers: _adminHeaders,
         body: jsonEncode({'approvedBy': approvedBy}),
       ).timeout(_timeout);
       return res.statusCode == 200;
@@ -501,7 +537,7 @@ class CloudflareService {
 
   static Future<bool> deleteAccount(String id) async {
     try {
-      final res = await http.delete(Uri.parse('$baseUrl/api/staff/$id'), headers: _headers).timeout(_timeout);
+      final res = await http.delete(Uri.parse('$baseUrl/api/staff/$id'), headers: _adminHeaders).timeout(_timeout);
       return res.statusCode == 200;
     } catch (e) {
       debugPrint('[CF] deleteAccount error: $e');
@@ -511,7 +547,7 @@ class CloudflareService {
 
   static Future<List<Map<String, dynamic>>> getLoginLogs() async {
     try {
-      final res = await http.get(Uri.parse('$baseUrl/api/logs'), headers: _headers).timeout(_timeout);
+      final res = await http.get(Uri.parse('$baseUrl/api/logs'), headers: _adminHeaders).timeout(_timeout);
       if (res.statusCode == 200) {
         return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
       }
@@ -531,7 +567,7 @@ class CloudflareService {
     try {
       final res = await http.post(
         Uri.parse('$baseUrl/api/icount/session'),
-        headers: _headers,
+        headers: _adminHeaders,
         body: jsonEncode({
           'companyCode': companyCode,
           'userId': userId,
@@ -554,7 +590,7 @@ class CloudflareService {
     try {
       final res = await http.post(
         Uri.parse('$baseUrl/api/icount/estimate'),
-        headers: _headers,
+        headers: _adminHeaders,
         body: jsonEncode({'sessionId': sessionId, 'zone': zone, 'estimateItems': items}),
       ).timeout(_timeout);
       return jsonDecode(res.body) as Map<String, dynamic>;
@@ -566,7 +602,7 @@ class CloudflareService {
 
   static Future<Map<String, dynamic>?> icountGetConfig() async {
     try {
-      final res = await http.get(Uri.parse('$baseUrl/api/icount/config'), headers: _headers).timeout(_timeout);
+      final res = await http.get(Uri.parse('$baseUrl/api/icount/config'), headers: _adminHeaders).timeout(_timeout);
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body);
         return body == null ? null : body as Map<String, dynamic>;
@@ -589,7 +625,7 @@ class CloudflareService {
     try {
       final res = await http.post(
         Uri.parse('$baseUrl/api/icount/config'),
-        headers: _headers,
+        headers: _adminHeaders,
         body: jsonEncode({
           'companyCode': companyCode,
           'userId': userId,

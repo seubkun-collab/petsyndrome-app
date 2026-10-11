@@ -33,12 +33,10 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     setState(() { _loading = true; _error = null; });
 
-    // 관리자 체크 (petsyndrome + 로컬 비밀번호)
-    final isAdmin = DataService.checkLogin(name, pin);
-    if (isAdmin) {
-      try {
-        await CloudflareService.loginAccount(name: name, pin: pin, role: 'admin');
-      } catch (_) {}
+    // 관리자 체크 (서버가 실제로 검증하고 세션 토큰을 발급)
+    final adminRes = await CloudflareService.adminLogin(id: name, pw: pin);
+    if (adminRes['ok'] == true) {
+      await DataService.setAdminToken(adminRes['token'] as String?);
       await DataService.setLoggedIn(true);
       if (mounted) context.go('/admin/ingredients');
       return;
