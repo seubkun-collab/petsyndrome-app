@@ -667,6 +667,88 @@ export default {
       return json({ ok: true });
     }
 
+    // ── 재고 조회 (구글시트 생산스케쥴 "재고" 버튼 전용, env.ICOUNT_SYNC_TOKEN 으로 인증) ──
+    // 예전에는 구글 앱스크립트가 이카운트 OAPI를 직접 호출했는데, 앱스크립트 쪽 발신 IP가
+    // 고정되어 있지 않아 이카운트 IP 허용 설정과 자꾸 어긋났다. 이 엔드포인트로 대신 Worker가
+    // 이카운트를 호출하도록 옮겨서, 앱스크립트는 이 Worker 주소 하나만 호출하면 된다 (2026-10-12).
+    if (path === '/api/icount/inventory' && method === 'POST') {
+      const auth = request.headers.get('Authorization');
+      const syncToken = env.ICOUNT_SYNC_TOKEN || '';
+      if (!syncToken) return err('서버 설정 오류: ICOUNT_SYNC_TOKEN이 구성되지 않았습니다.', 500);
+      if (auth !== `Bearer ${syncToken}`) return err('Unauthorized', 401);
+
+      const body = await request.json().catch(() => ({}));
+      const names = Array.isArray(body.names)
+        ? [...new Set(body.names.map(n => String(n || '').trim()).filter(Boolean))]
+        : [];
+      if (names.length === 0) return err('names 배열(품목명 목록)이 필요합니다.');
+      const whCode = String(body.whCode || '00002');
+
+      const cfg = await kvGet(kv, 'icount_config', null);
+      const companyCode = body.companyCode || cfg?.companyCode;
+      const userId = body.userId || cfg?.userId;
+      const apiCertKey = body.apiCertKey || cfg?.apiCertKey;
+      if (!companyCode || !userId || !apiCertKey) {
+        return err('이카운트 연동 정보가 설정되어 있지 않습니다. 관리자 설정 화면에서 먼저 저장해주세요.', 400);
+      }
+
+      try {
+        // 1단계: Zone 조회
+        const zRes = await fetch('https://oapi.ecount.com/OAPI/V2/Zone', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ COM_CODE: companyCode }),
+        });
+        const zData = await zRes.json();
+        const zone = zData?.Data?.ZONE ? String(zData.Data.ZONE) : null;
+        if (!zone) return err('이카운트 Zone 조회 실패: ' + JSON.stringify(zData), 502);
+
+        // 2단계: 로그인
+        const loginRes = await fetch(`https://oapi${zone}.ecount.com/OAPI/V2/OAPILogin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ COM_CODE: companyCode, USER_ID: userId, API_CERT_KEY: apiCertKey, ZONE: zone, LAN_TYPE: 'ko-KR' }),
+        });
+        const loginData = await loginRes.json();
+        const sessionId = loginData?.Data?.Datas?.SESSION_ID;
+        const hostUrl = loginData?.Data?.Datas?.HOST_URL;
+        if (!sessionId || !hostUrl) return err('이카운트 로그인 실패: ' + JSON.stringify(loginData), 502);
+
+        // 3단계: 재고 조회 (창고별 재고현황)
+        const baseDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' }).replace(/-/g, '');
+        const invUrl = `https://${hostUrl}/OAPI/V2/InventoryBalance/GetListInventoryBalanceStatusByLocation?SESSION_ID=${encodeURIComponent(sessionId)}`;
+        const invRes = await fetch(invUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ COM_CODE: companyCode, USER_ID: userId, BASE_DATE: baseDate }),
+        });
+        const invData = await invRes.json();
+        if (String(invData?.Status) !== '200') return err('이카운트 재고 조회 실패: ' + JSON.stringify(invData), 502);
+
+        const rawRows = invData.Data;
+        const rows = Array.isArray(rawRows)
+          ? rawRows
+          : (rawRows && typeof rawRows === 'object'
+              ? (Object.values(rawRows).find(v => Array.isArray(v)) || [])
+              : []);
+
+        const quantities = {};
+        names.forEach(n => { quantities[n] = '0.00'; });
+        rows.forEach(x => {
+          const wh = String(x.WH_CD || '').trim();
+          if (wh !== whCode) return;
+          const name = String(x.PROD_DES || '').trim();
+          if (!(name in quantities)) return;
+          const q = Number(x.BAL_QTY);
+          quantities[name] = Number.isFinite(q) ? q.toFixed(2) : '0.00';
+        });
+
+        return json({ ok: true, updatedAt: new Date().toISOString(), whCode, quantities });
+      } catch (e) {
+        return err('이카운트 재고 조회 중 오류: ' + e.message, 500);
+      }
+    }
+
     // ── 데이터 초기화 (env.SEED_TOKEN 으로 인증) ──
     if (path === '/api/seed' && method === 'POST') {
       const auth = request.headers.get('Authorization');
